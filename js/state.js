@@ -87,7 +87,7 @@ export function getEndpoint(kind = 'messages') {
     : sanitizePath(state.connection.path || '/messages_v1', '/messages_v1');
 
   if (!host || !port) return '';
-  return `http://${host}:${port}${path}`;
+  return `https://${host}:${port}${path}`;
 }
 
 export function getPeerRuntime(peerGuid) {
