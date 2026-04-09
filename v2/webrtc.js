@@ -124,7 +124,6 @@ async function sendNegotiationMessage(pg, baseType, payload) {
 
 export { _ensurePeerConnection as ensurePeerConnection, destroyPC };
 export function getPeerConnection(pg) { return getPeerRuntime(pg).pc; }
-export { sendDirectPayload, sendDirectChatPayload, setRemoteAudioMuted, handleSignalMessage, pollSignalServer, ensureHandshakeLoop, stopHandshakeLoop, ensureRetryLoop, stopRetryLoop, ensureDirectForPeer, getPeerConnectionStatus, clearPeerMedia, closePeerConnection };
 
 function destroyPC(pg) {
   const r = getPeerRuntime(pg);
@@ -443,7 +442,7 @@ export function getPeerConnectionStatus(pg) {
   };
 }
 
-function clearPeerMedia(pg) {
+export function clearPeerMedia(pg) {
   const r = getPeerRuntime(pg);
   if (r.pc) { try { r.pc.getSenders().forEach(s => { if (s.track?.kind === 'audio') { try { r.pc.removeTrack(s); s.track.stop(); } catch (_) {} } }); } catch (_) {} }
   if (r.localStream) { try { r.localStream.getTracks().forEach(t => t.stop()); } catch (_) {} r.localStream = null; }
@@ -452,7 +451,7 @@ function clearPeerMedia(pg) {
   emitUiRefresh();
 }
 
-async function closePeerConnection(pg) {
+export async function closePeerConnection(pg) {
   const r = getPeerRuntime(pg);
   stopPingLoop(pg); stopRetryLoop(pg); stopHandshakeLoop(pg);
   clearPeerMedia(pg);
