@@ -35,44 +35,6 @@ export async function postJSON(url, payload, timeout = 6000) {
   }
 }
 
-/**
- * Отправка сообщений в конкретную "книжку" (book) пары клиентов.
- * Каждая пара имеет свой уникальный URL чтобы сообщения не пересекались.
- */
-export async function postToBook(receiverGuid, bookPath, messages, timeout = 6000) {
-  const endpoint = getEndpoint('messages', bookPath);
-  if (!endpoint) throw new Error('Не задан endpoint сообщений');
-  return postJSON(endpoint, { guid: receiverGuid, messages }, timeout);
-}
-
-/**
- * Получение сообщений из конкретной "книжки".
- */
-export async function pullFromBook(myGuid, bookPath, timeout = 6000) {
-  const endpoint = getEndpoint('messages', bookPath);
-  if (!endpoint) throw new Error('Не задан endpoint сообщений');
-  return postJSON(endpoint, { guid: myGuid }, timeout);
-}
-
-/**
- * Отправка signal-сообщений через STUN book.
- */
-export async function postSignalBook(senderGuid, receiverGuid, messages, stunBookPath, timeout = 6000) {
-  const endpoint = getEndpoint('stun', stunBookPath);
-  if (!endpoint) throw new Error('Не задан endpoint signal/stun');
-  return postJSON(endpoint, { guid: receiverGuid, messages }, timeout);
-}
-
-/**
- * Получение signal-сообщений из STUN book.
- */
-export async function pullSignalBook(myGuid, stunBookPath, timeout = 6000) {
-  const endpoint = getEndpoint('stun', stunBookPath);
-  if (!endpoint) throw new Error('Не задан endpoint signal/stun');
-  return postJSON(endpoint, { guid: myGuid }, timeout);
-}
-
-// Обратная совместимость — регулярные сообщения через основной path
 export async function postMessages(payload, timeout = 6000) {
   const endpoint = getEndpoint('messages');
   if (!endpoint) throw new Error('Не задан endpoint сообщений');

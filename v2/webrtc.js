@@ -1,6 +1,6 @@
-import { pullSignalBook, postSignalBook } from './api.js';
+import { pullSignalMessages, sendGenericSignal } from './api.js';
 import { state, getActiveAccount, getDialogMap, getPeerRuntime, getSelectedPeerGuid } from './state.js';
-import { MESSAGE_NAMESPACE, SIGNAL_NAMESPACE, WEBRTC_RETRY_INTERVAL, HANDSHAKE_INTERVAL, nowSeconds, uuidV5, makeSignalBookPath, makeStunBookPath } from './utils.js';
+import { SIGNAL_NAMESPACE, WEBRTC_RETRY_INTERVAL, HANDSHAKE_INTERVAL, nowSeconds, uuidV5 } from './utils.js';
 import { ensureDialog, receiveDirectChatMessage, handleMsgAck, retryPendingMessage } from './chats.js';
 import { saveState } from './storage.js';
 
@@ -21,15 +21,6 @@ function getPeerNickname(peerGuid) {
   return dialogs[peerGuid] ? dialogs[peerGuid].peerNickname : 'unknown';
 }
 
-/**
- * Получает book path для signal-сообщений пары.
- */
-function getStunBookPath(peerGuid) {
-  const account = getActiveAccount();
-  if (!account) return '';
-  return makeStunBookPath(account.guid, peerGuid);
-}
-
 async function buildSignalMessage(type, payload) {
   const account = getActiveAccount();
   const timestamp = nowSeconds();
@@ -45,64 +36,21 @@ async function buildSignalMessage(type, payload) {
 }
 
 /**
- * Отправляет signal-сообщение в STUN book конкретной пары.
+ * Отправляет signal-сообщение peer'у через фиксированный STUN endpoint.
  */
 async function sendServerSignal(peerGuid, type, payload = {}) {
   const account = getActiveAccount();
   if (!account) return false;
 
   const message = await buildSignalMessage(type, payload);
-  const bookPath = getStunBookPath(peerGuid);
-  if (!bookPath) {
-    console.warn('[v2] sendServerSignal: no book path for', peerGuid.slice(0, 8));
-    return false;
-  }
 
   try {
-    const result = await postSignalBook(account.guid, peerGuid, [message], bookPath);
-    if (!result.ok) {
-      console.warn('[v2] sendServerSignal HTTP', result.status, 'for', peerGuid.slice(0, 8));
-    }
+    const result = await sendGenericSignal(peerGuid, [message]);
     return result.ok;
   } catch (err) {
     console.warn('[v2] sendServerSignal error:', err.message);
     return false;
   }
-}
-
-/**
- * Поллит signal-сообщения из STUN book пары.
- */
-async function pullStunBookMessages() {
-  const account = getActiveAccount();
-  if (!account) return { ok: false, skipped: true };
-
-  const results = [];
-  const processedPeerGuids = new Set();
-  const processedBooks = new Set();
-
-  // Собираем все активные peerGuid из runtime
-  const peerGuids = Object.keys(state.webrtc.byPeerGuid || {});
-  if (peerGuids.length === 0) {
-    return { ok: true, results: [] };
-  }
-
-  for (const peerGuid of peerGuids) {
-    const bookPath = getStunBookPath(peerGuid);
-    if (!bookPath || processedBooks.has(bookPath)) continue;
-    processedBooks.add(bookPath);
-
-    try {
-      const result = await pullSignalBook(account.guid, bookPath);
-      if (result.ok && result.data && result.data.messages) {
-        results.push({ peerGuid, messages: result.data.messages });
-      }
-    } catch (err) {
-      console.warn('[v2] book poll error for', peerGuid.slice(0, 8), ':', err.message);
-    }
-  }
-
-  return { ok: true, results };
 }
 
 function stopPingLoop(peerGuid) {
@@ -251,7 +199,7 @@ export function getPeerConnection(peerGuid) {
 }
 
 /**
- * Создаёт или возвращает PeerConnection.
+ * Создаёт или возвращит PeerConnection.
  * При создании нового PC — сбрасывает все предыдущие состояния.
  */
 export async function ensurePeerConnection(peerGuid, peerNickname) {
@@ -575,6 +523,33 @@ async function handleSignalMessage(message) {
   if (message.guid && runtime.seenSignalIds[message.guid]) return false;
   if (message.guid) runtime.seenSignalIds[message.guid] = Date.now();
 
+  // Handshake request — специальный обработчик
+  if (message.type === 'handshake_request') {
+    console.log('[v2] received handshake_request from', peerGuid.slice(0, 8));
+    runtime.lastHandshakeAt = Date.now();
+    runtime.handshakePending = false;
+
+    // Запускаем renegotiation
+    if (!runtime.directReady || !runtime.pc) {
+      await ensurePeerConnection(peerGuid, peerNickname);
+      console.log('[v2] handshake: created PC for', peerGuid.slice(0, 8));
+    } else {
+      // PC есть но DC закрыт — пересоздаём
+      if (!runtime.dc || runtime.dc.readyState !== 'open') {
+        try { runtime.pc.close(); } catch (_) {}
+        runtime.pc = null;
+        runtime.dc = null;
+        runtime.directReady = false;
+        await ensurePeerConnection(peerGuid, peerNickname);
+        console.log('[v2] handshake: recreated PC for', peerGuid.slice(0, 8));
+      }
+    }
+
+    saveState();
+    emitUiRefresh();
+    return true;
+  }
+
   if (
     message.type === 'webrtc_offer' ||
     message.type === 'webrtc_answer' ||
@@ -597,23 +572,6 @@ export async function pollSignalServer() {
 
   let anyChanged = false;
 
-  // 1) Поллим STUN book'и для каждой активной пары (основной путь)
-  try {
-    const stunResults = await pullStunBookMessages();
-    if (stunResults.ok && stunResults.results) {
-      for (const { peerGuid, messages } of stunResults.results) {
-        const incoming = Array.isArray(messages) ? messages : [];
-        for (const item of incoming) {
-          const handled = await handleSignalMessage(item);
-          anyChanged = anyChanged || handled;
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('[v2] stun book poll error:', err.message);
-  }
-
-  // 2) Поллим default signal endpoint (обратная совместимость)
   try {
     const result = await pullSignalMessages();
     if (result.ok && result.result && result.result.data) {
@@ -624,7 +582,7 @@ export async function pollSignalServer() {
       }
     }
   } catch (err) {
-    console.warn('[v2] default signal poll error:', err.message);
+    console.warn('[v2] signal poll error:', err.message);
   }
 
   if (anyChanged) {
@@ -652,11 +610,9 @@ export function ensureHandshakeLoop(peerGuid, peerNickname) {
     if (runtime.handshakePending) return;
 
     console.log('[v2] sending handshake_request to', peerGuid.slice(0, 8));
-    // Отправляем handshake_request через сервер
     runtime.handshakePending = true;
     runtime.lastHandshakeSentAt = Date.now();
     sendServerSignal(peerGuid, 'handshake_request', {
-      from_guid: getActiveAccount()?.guid,
       timestampMs: Date.now()
     }).then((ok) => {
       console.log('[v2] handshake sent:', ok);
@@ -717,7 +673,6 @@ export function getPeerConnectionStatus(peerGuid) {
     pingMs: runtime.directReady ? runtime.pingMs : null,
     directReady: runtime.directReady,
     callEnabled: runtime.callEnabled && runtime.directReady,
-    // Статусы доставки pending-сообщений
     pendingMessagesCount: Object.keys(runtime.pendingMessages || {}).length,
     handshakePending: runtime.handshakePending
   };
@@ -782,6 +737,8 @@ export async function closePeerConnection(peerGuid) {
     delete hiddenAudioEls[peerGuid];
   }
 
+  // Clear peer runtime completely (timers handled in clearPeerRuntime)
+  const { clearPeerRuntime } = await import('./state.js');
   clearPeerRuntime(peerGuid);
   emitUiRefresh();
 }
