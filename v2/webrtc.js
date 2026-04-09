@@ -250,7 +250,11 @@ async function processNegotiationMessage(pg, messageType, payload, nickname) {
     if (!offer) return false;
     if (r.dc?.readyState === 'open') return true;
 
-    // PC в stable — принимаем offer
+    // Если PC уже в процессе negotiation — игнорируем дубликаты
+    const busy = new Set(['have-remote-offer', 'have-local-offer']);
+    if (busy.has(pc.signalingState)) return true;
+
+    // Если PC в stable — принимаем offer
     if (pc.signalingState === 'stable') {
       try {
         await pc.setRemoteDescription(offer);
@@ -264,29 +268,30 @@ async function processNegotiationMessage(pg, messageType, payload, nickname) {
       }
     }
 
-    // PC не в stable — создаём новый
-    r.pc = null; r.dc = null; r.directReady = false;
-    r.makingOffer = false; r.ignoreOffer = false;
-    r.seenSignalIds = {}; r.remoteCandidatesQueue = [];
-    const newPc = await _ensurePeerConnection(pg, nickname);
-    if (!newPc) return false;
-    try {
-      await newPc.setRemoteDescription(offer);
-      await flushQueuedCandidates(r);
-      await newPc.setLocalDescription(await newPc.createAnswer());
-      await sendNegotiationMessage(pg, 'answer', { sdp: newPc.localDescription });
-      return true;
-    } catch (e) { console.warn('[v2] offer error after recreate:', e.message); }
+    // PC в другом состоянии (closed/error) — создаём новый
+    if (pc.signalingState === 'closed' || !r.pc) {
+      r.pc = null; r.dc = null; r.directReady = false;
+      r.makingOffer = false; r.ignoreOffer = false;
+      r.seenSignalIds = {}; r.remoteCandidatesQueue = [];
+      const newPc = await _ensurePeerConnection(pg, nickname);
+      if (!newPc) return false;
+      try {
+        await newPc.setRemoteDescription(offer);
+        await flushQueuedCandidates(r);
+        await newPc.setLocalDescription(await newPc.createAnswer());
+        await sendNegotiationMessage(pg, 'answer', { sdp: newPc.localDescription });
+        return true;
+      } catch (e) { console.warn('[v2] offer error after recreate:', e.message); }
+    }
+
     return false;
   }
 
   if (messageType === 'webrtc_answer' || messageType === 'signal_answer') {
     const answer = payload?.sdp;
     if (!answer) return false;
-    if (pc.signalingState !== 'have-local-offer') {
-      console.log('[v2] ignoring answer, state:', pc.signalingState);
-      return false;
-    }
+    if (r.dc?.readyState === 'open') return true;
+    if (pc.signalingState !== 'have-local-offer') return false;
     try {
       await pc.setRemoteDescription(answer);
       await flushQueuedCandidates(r);
