@@ -324,6 +324,10 @@ export async function pullMessages() {
     const messages = result.result.data.messages || [];
     let selectedChanged = false;
 
+    if (messages.length > 0) {
+      console.log('[v2] pullMessages received', messages.length, 'messages, types:', messages.map(m => m.type || 'chat').join(', '));
+    }
+
     for (const item of messages) {
       if (item.type) {
         // Signal message — обрабатываем через WebRTC

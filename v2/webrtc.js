@@ -168,10 +168,12 @@ async function sendNegotiationMessage(peerGuid, baseType, payload) {
 
   // Пробуем STUN endpoint
   let result = await sendGenericSignal(peerGuid, [message]);
+  console.log('[v2] sendNegotiationMessage', type, 'to', peerGuid.slice(0, 8), 'stun:', result.ok, result.status);
   if (result.ok) return true;
 
   // Fallback: messages endpoint
   result = await sendGenericMessages(peerGuid, [message]);
+  console.log('[v2] sendNegotiationMessage fallback', type, 'to', peerGuid.slice(0, 8), 'messages:', result.ok, result.status);
   return result.ok;
 }
 
