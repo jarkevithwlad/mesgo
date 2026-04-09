@@ -431,7 +431,35 @@ async function handleDirectPayload(peerGuid, payload) {
       return;
     }
 
-    // ВСЕГДА пересоздаём PC при handshake_request — это гарантия renegotiation
+    // Если PC есть и negotiation в процессе — НЕ пересоздаём, ждём
+    const busyStates = new Set(['have-remote-offer', 'have-local-offer', 'have-local-pranswer', 'have-remote-pranswer']);
+    if (runtime.pc && busyStates.has(runtime.pc.signalingState)) {
+      console.log('[v2] handshake: negotiation in progress, skipping for', peerGuid.slice(0, 8));
+      emitUiRefresh();
+      return;
+    }
+
+    // Если ICE в процессе — НЕ пересоздаём
+    if (runtime.pc) {
+      const ice = runtime.pc.iceConnectionState;
+      if (ice === 'checking' || ice === 'connected' || ice === 'completed' || ice === 'new') {
+        console.log('[v2] handshake: ICE', ice, ', skipping for', peerGuid.slice(0, 8));
+        // Только polite клиент шлёт offer если его ещё нет
+        if (runtime.polite && !runtime.makingOffer) {
+          try {
+            runtime.makingOffer = true;
+            await runtime.pc.setLocalDescription();
+            await sendNegotiationMessage(peerGuid, 'offer', { sdp: runtime.pc.localDescription });
+            console.log('[v2] handshake: polite sent offer for', peerGuid.slice(0, 8));
+          } catch (_) {}
+          finally { runtime.makingOffer = false; }
+        }
+        emitUiRefresh();
+        return;
+      }
+    }
+
+    // PC нет или в failed/disconnected — пересоздаём
     console.log('[v2] handshake: recreating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
     await recreatePeerConnection(peerGuid, peerNickname);
     const pc = runtime.pc;
