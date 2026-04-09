@@ -162,18 +162,11 @@ async function sendNegotiationMessage(peerGuid, baseType, payload) {
   const type = getTransportType(baseType, useDirect);
   if (useDirect) return sendDirectPayload(peerGuid, { type, payload });
 
-  // Строим signal сообщение и отправляем
+  // Всё через messages endpoint — STUN endpoint не поллится имполит клиентом
   const message = await buildSignalMessage(type, payload);
-  const { sendGenericSignal, sendGenericMessages } = await import('./api.js');
-
-  // Пробуем STUN endpoint
-  let result = await sendGenericSignal(peerGuid, [message]);
-  console.log('[v2] sendNegotiationMessage', type, 'to', peerGuid.slice(0, 8), 'stun:', result.ok, result.status);
-  if (result.ok) return true;
-
-  // Fallback: messages endpoint
-  result = await sendGenericMessages(peerGuid, [message]);
-  console.log('[v2] sendNegotiationMessage fallback', type, 'to', peerGuid.slice(0, 8), 'messages:', result.ok, result.status);
+  const { sendGenericMessages } = await import('./api.js');
+  const result = await sendGenericMessages(peerGuid, [message]);
+  console.log('[v2] sendNegotiationMessage', type, 'to', peerGuid.slice(0, 8), 'messages:', result.ok, result.status);
   return result.ok;
 }
 
