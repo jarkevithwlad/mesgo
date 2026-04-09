@@ -202,6 +202,16 @@ export function getPeerConnection(peerGuid) {
  * Создаёт или возвращит PeerConnection.
  * При создании нового PC — сбрасывает все предыдущие состояния.
  */
+/**
+ * Список состояний signalling где negotiation уже в процессе.
+ */
+const BUSY_SIGNALING_STATES = new Set([
+  'have-remote-offer',
+  'have-local-offer',
+  'have-local-pranswer',
+  'have-remote-pranswer'
+]);
+
 export async function ensurePeerConnection(peerGuid, peerNickname) {
   const account = getActiveAccount();
   if (!account) return null;
@@ -210,19 +220,21 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
 
   const runtime = getPeerRuntime(peerGuid);
 
-  // Если уже есть живой PC с open DC — возвращаем его
+  // Если PC есть и negotiation в процессе — НЕ пересоздаём
+  if (runtime.pc && BUSY_SIGNALING_STATES.has(runtime.pc.signalingState)) {
+    return runtime.pc;
+  }
+
+  // Если DC open — PC живой
   if (runtime.pc && runtime.dc && runtime.dc.readyState === 'open') {
     return runtime.pc;
   }
 
-  // Если PC есть и ещё не закрыт (идёт negotiation) — НЕ пересоздаём
+  // Если PC есть но closed — зачищаем
   if (runtime.pc) {
-    const signalingState = runtime.pc.signalingState;
-    if (signalingState !== 'closed') {
-      // Negotiation в процессе, не мешаем
-      return runtime.pc;
-    }
-    // PC полностью закры — зачищаем
+    try {
+      runtime.pc.close();
+    } catch (_) {}
     runtime.pc = null;
     runtime.dc = null;
     runtime.directReady = false;
@@ -532,21 +544,25 @@ async function handleSignalMessage(message) {
     runtime.lastHandshakeAt = Date.now();
     runtime.handshakePending = false;
 
-    // Запускаем renegotiation
-    if (!runtime.directReady || !runtime.pc) {
-      await ensurePeerConnection(peerGuid, peerNickname);
-      console.log('[v2] handshake: created PC for', peerGuid.slice(0, 8));
-    } else {
-      // PC есть но DC закрыт — пересоздаём
-      if (!runtime.dc || runtime.dc.readyState !== 'open') {
-        try { runtime.pc.close(); } catch (_) {}
-        runtime.pc = null;
-        runtime.dc = null;
-        runtime.directReady = false;
-        await ensurePeerConnection(peerGuid, peerNickname);
-        console.log('[v2] handshake: recreated PC for', peerGuid.slice(0, 8));
+    // Если PC уже есть и negotiation в процессе или DC open — НЕ пересоздаём
+    if (runtime.pc) {
+      if (BUSY_SIGNALING_STATES.has(runtime.pc.signalingState)) {
+        console.log('[v2] handshake: PC already negotiating, skipping');
+        saveState();
+        emitUiRefresh();
+        return true;
+      }
+      if (runtime.dc && runtime.dc.readyState === 'open') {
+        console.log('[v2] handshake: DC already open, skipping');
+        saveState();
+        emitUiRefresh();
+        return true;
       }
     }
+
+    // PC нет или закрыт — создаём
+    await ensurePeerConnection(peerGuid, peerNickname);
+    console.log('[v2] handshake: created/reused PC for', peerGuid.slice(0, 8));
 
     saveState();
     emitUiRefresh();
