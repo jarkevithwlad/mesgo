@@ -425,17 +425,18 @@ async function handleDirectPayload(peerGuid, payload) {
       return;
     }
 
-    // Пересоздаём PC и сразу отправляем свой offer
-    console.log('[v2] handshake: recreating PC and sending offer for', peerGuid.slice(0, 8));
+    // Peresоздаём PC для чистой negotiation
+    console.log('[v2] handshake: recreating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
     await recreatePeerConnection(peerGuid, peerNickname);
     const pc = runtime.pc;
+
+    // Только polite клиент инициирует negotiation — impolite ждёт offer
     if (pc && runtime.polite) {
-      // Polite клиент сразу шлёт offer
       try {
         runtime.makingOffer = true;
         await pc.setLocalDescription();
         await sendNegotiationMessage(peerGuid, 'offer', { sdp: pc.localDescription });
-        console.log('[v2] handshake: offer sent for', peerGuid.slice(0, 8));
+        console.log('[v2] handshake: polite sent offer for', peerGuid.slice(0, 8));
       } catch (e) {
         console.warn('[v2] handshake offer error:', e.message);
       } finally {
@@ -447,8 +448,30 @@ async function handleDirectPayload(peerGuid, payload) {
     return;
   }
   if (payload.type === 'handshake_response') {
+    // Impolite клиент получил подтверждение что peer готов — инициируем negotiation
+    const runtime = getPeerRuntime(peerGuid);
     runtime.lastHandshakeResponseAt = Date.now();
     runtime.handshakePending = false;
+
+    if (runtime.dc?.readyState === 'open') {
+      emitUiRefresh();
+      return;
+    }
+
+    // Если мы polite и DC нет — шлём offer
+    if (runtime.polite && runtime.pc && (!runtime.dc || runtime.dc.readyState !== 'open')) {
+      console.log('[v2] handshake_response: polite sending offer for', peerGuid.slice(0, 8));
+      try {
+        runtime.makingOffer = true;
+        await runtime.pc.setLocalDescription();
+        await sendNegotiationMessage(peerGuid, 'offer', { sdp: runtime.pc.localDescription });
+      } catch (e) {
+        console.warn('[v2] handshake_response offer error:', e.message);
+      } finally {
+        runtime.makingOffer = false;
+      }
+    }
+
     emitUiRefresh();
     return;
   }
