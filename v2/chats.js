@@ -313,17 +313,36 @@ export async function pullMessages() {
     return { ok: false, blocked: true };
   }
 
-  // Pull from default endpoint + from all active dialog books
-  const result = await pullRegularMessages();
+  let result;
+  try {
+    result = await pullRegularMessages();
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 
-  // TODO: Pull from individual books if needed
-  // For now rely on WebRTC direct channel for active dialogs
+  if (result.ok && result.result && result.result.data) {
+    const messages = result.result.data.messages || [];
+    let selectedChanged = false;
 
-  if (!result.ok || !result.result || !result.result.data) return result;
+    for (const item of messages) {
+      if (item.type) {
+        // Signal message — обрабатываем через WebRTC
+        try {
+          const { handleSignalMessage } = await import('./webrtc.js');
+          await handleSignalMessage(item);
+        } catch (_) {}
+      } else {
+        // Обычное сообщение
+        const changed = await mergeIncomingPayload({ messages: [item] });
+        selectedChanged = selectedChanged || changed;
+      }
+    }
 
-  const selectedChanged = await mergeIncomingPayload(result.result.data);
-  saveState();
-  return { ...result, selectedChanged };
+    saveState();
+    return { ...result, selectedChanged };
+  }
+
+  return result;
 }
 
 // Re-export pullRegularMessages for compatibility

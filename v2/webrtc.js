@@ -38,25 +38,24 @@ async function sendServerSignal(peerGuid, type, payload = {}) {
   const account = getActiveAccount();
   if (!account) return false;
   const message = await buildSignalMessage(type, payload);
-  try {
-    let result = await sendGenericSignal(peerGuid, [message]);
-    // Если STUN endpoint не работает (404/500) — fallback через messages endpoint
-    if (!result.ok && (result.status === 404 || result.status === 500)) {
-      const { sendGenericMessages } = await import('./api.js');
-      result = await sendGenericMessages(peerGuid, [message]);
-    }
-    return result.ok;
-  } catch (err) {
-    console.warn('[v2] signal send error, trying fallback:', err.message);
+
+  // Всё идёт через один messages endpoint — сервер маршрутизирует по guid
+  const { sendGenericMessages } = await import('./api.js');
+
+  for (let attempt = 0; attempt < 8; attempt++) {
     try {
-      const { sendGenericMessages } = await import('./api.js');
       const result = await sendGenericMessages(peerGuid, [message]);
-      return result.ok;
-    } catch (e) {
-      console.warn('[v2] signal fallback also failed:', e.message);
-      return false;
+      if (result.ok) return true;
+      if (result.status === 429) {
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+    } catch (err) {
+      console.warn('[v2] signal send attempt', attempt + 1, 'failed:', err.message);
     }
+    if (attempt < 7) await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
   }
+  return false;
 }
 
 function stopPingLoop(peerGuid) {
@@ -439,7 +438,7 @@ async function handleDirectPayload(peerGuid, payload) {
   }
 }
 
-async function handleSignalMessage(message) {
+export async function handleSignalMessage(message) {
   const account = getActiveAccount();
   if (!account || !message?.type) return false;
   const peerGuid = String(message.from_guid || '').toLowerCase();
@@ -473,30 +472,22 @@ export async function pollSignalServer() {
   const account = getActiveAccount();
   if (!account) return { ok: false, skipped: true };
   let anyChanged = false;
-  try {
-    const result = await pullSignalMessages();
-    if (result.ok && result.result?.data) {
-      for (const item of (result.result.data.messages || [])) {
-        anyChanged = anyChanged || await handleSignalMessage(item);
-      }
-    }
-  } catch (err) {
-    console.warn('[v2] signal poll error:', err.message);
-  }
 
-  // Fallback: если STUN endpoint не работает, поллим messages endpoint для signal
+  // Поллим messages endpoint — server маршрутизирует signal сообщения туда же
   try {
     const { pullRegularMessages } = await import('./api.js');
     const result = await pullRegularMessages();
     if (result.ok && result.result?.data) {
       const messages = result.result.data.messages || [];
       for (const item of messages) {
-        if (item.type) { // Это signal message
+        if (item.type) { // signal message
           anyChanged = anyChanged || await handleSignalMessage(item);
         }
       }
     }
-  } catch (_) {}
+  } catch (err) {
+    console.warn('[v2] messages poll error:', err.message);
+  }
 
   if (anyChanged) { saveState(); emitUiRefresh(); }
   return { ok: true, changed: anyChanged };
