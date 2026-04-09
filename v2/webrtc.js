@@ -53,12 +53,19 @@ async function sendServerSignal(peerGuid, type, payload = {}) {
 
   const message = await buildSignalMessage(type, payload);
   const bookPath = getStunBookPath(peerGuid);
-  if (!bookPath) return false;
+  if (!bookPath) {
+    console.warn('[v2] sendServerSignal: no book path for', peerGuid.slice(0, 8));
+    return false;
+  }
 
   try {
     const result = await postSignalBook(account.guid, peerGuid, [message], bookPath);
+    if (!result.ok) {
+      console.warn('[v2] sendServerSignal HTTP', result.status, 'for', peerGuid.slice(0, 8));
+    }
     return result.ok;
-  } catch (_) {
+  } catch (err) {
+    console.warn('[v2] sendServerSignal error:', err.message);
     return false;
   }
 }
@@ -72,21 +79,27 @@ async function pullStunBookMessages() {
 
   const results = [];
   const processedPeerGuids = new Set();
+  const processedBooks = new Set();
 
   // Собираем все активные peerGuid из runtime
   const peerGuids = Object.keys(state.webrtc.byPeerGuid || {});
+  if (peerGuids.length === 0) {
+    return { ok: true, results: [] };
+  }
 
   for (const peerGuid of peerGuids) {
     const bookPath = getStunBookPath(peerGuid);
-    if (!bookPath || processedPeerGuids.has(bookPath)) continue;
-    processedPeerGuids.add(bookPath);
+    if (!bookPath || processedBooks.has(bookPath)) continue;
+    processedBooks.add(bookPath);
 
     try {
       const result = await pullSignalBook(account.guid, bookPath);
       if (result.ok && result.data && result.data.messages) {
         results.push({ peerGuid, messages: result.data.messages });
       }
-    } catch (_) {}
+    } catch (err) {
+      console.warn('[v2] book poll error for', peerGuid.slice(0, 8), ':', err.message);
+    }
   }
 
   return { ok: true, results };
@@ -582,49 +595,52 @@ export async function pollSignalServer() {
   const account = getActiveAccount();
   if (!account) return { ok: false, skipped: true };
 
-  // 1) Поллим default signal endpoint (обратная совместимость)
-  const result = await pullSignalMessages();
-  if (result.ok && result.result && result.result.data) {
-    const incoming = Array.isArray(result.result.data.messages) ? result.result.data.messages : [];
-    let changed = false;
+  let anyChanged = false;
 
-    for (const item of incoming) {
-      const handled = await handleSignalMessage(item);
-      changed = changed || handled;
-    }
-
-    if (changed) {
-      saveState();
-      emitUiRefresh();
-    }
-  }
-
-  // 2) Поллим STUN book'и для каждой активной пары
-  const stunResults = await pullStunBookMessages();
-  if (stunResults.ok && stunResults.results) {
-    let changed = false;
-
-    for (const { peerGuid, messages } of stunResults.results) {
-      const incoming = Array.isArray(messages) ? messages : [];
-      for (const item of incoming) {
-        const handled = await handleSignalMessage(item);
-        changed = changed || handled;
+  // 1) Поллим STUN book'и для каждой активной пары (основной путь)
+  try {
+    const stunResults = await pullStunBookMessages();
+    if (stunResults.ok && stunResults.results) {
+      for (const { peerGuid, messages } of stunResults.results) {
+        const incoming = Array.isArray(messages) ? messages : [];
+        for (const item of incoming) {
+          const handled = await handleSignalMessage(item);
+          anyChanged = anyChanged || handled;
+        }
       }
     }
-
-    if (changed) {
-      saveState();
-      emitUiRefresh();
-    }
+  } catch (err) {
+    console.warn('[v2] stun book poll error:', err.message);
   }
 
-  return { ok: true, changed: true };
+  // 2) Поллим default signal endpoint (обратная совместимость)
+  try {
+    const result = await pullSignalMessages();
+    if (result.ok && result.result && result.result.data) {
+      const incoming = Array.isArray(result.result.data.messages) ? result.result.data.messages : [];
+      for (const item of incoming) {
+        const handled = await handleSignalMessage(item);
+        anyChanged = anyChanged || handled;
+      }
+    }
+  } catch (err) {
+    console.warn('[v2] default signal poll error:', err.message);
+  }
+
+  if (anyChanged) {
+    saveState();
+    emitUiRefresh();
+  }
+
+  return { ok: true, changed: anyChanged };
 }
 
 // ===== HANDSHAKE MECHANISM =====
 
 export function ensureHandshakeLoop(peerGuid, peerNickname) {
   if (state.webrtc.handshakeTimers[peerGuid]) return;
+
+  console.log('[v2] handshake loop started for', peerGuid.slice(0, 8));
 
   state.webrtc.handshakeTimers[peerGuid] = setInterval(() => {
     const runtime = getPeerRuntime(peerGuid);
@@ -635,13 +651,17 @@ export function ensureHandshakeLoop(peerGuid, peerNickname) {
     if (runtime.directReady) return;
     if (runtime.handshakePending) return;
 
+    console.log('[v2] sending handshake_request to', peerGuid.slice(0, 8));
     // Отправляем handshake_request через сервер
     runtime.handshakePending = true;
     runtime.lastHandshakeSentAt = Date.now();
     sendServerSignal(peerGuid, 'handshake_request', {
       from_guid: getActiveAccount()?.guid,
       timestampMs: Date.now()
-    }).catch(() => {
+    }).then((ok) => {
+      console.log('[v2] handshake sent:', ok);
+    }).catch((err) => {
+      console.warn('[v2] handshake send error:', err.message);
       runtime.handshakePending = false;
     });
   }, HANDSHAKE_INTERVAL);
@@ -678,6 +698,8 @@ export function stopRetryLoop(peerGuid) {
 
 export async function ensureDirectForPeer(peerGuid, peerNickname) {
   const runtime = getPeerRuntime(peerGuid);
+  console.log('[v2] ensureDirectForPeer', peerGuid.slice(0, 8), 'directReady:', runtime.directReady);
+
   if (runtime.directReady) return true;
 
   await initiateDirectPeer(peerGuid, peerNickname);

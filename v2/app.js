@@ -70,8 +70,10 @@ async function pollAll() {
 
   try {
     state.syncing = true;
-    await pullMessages();
-  } catch (_) {
+    const result = await pullMessages();
+    console.log('[v2] pullMessages result:', result.ok ? 'ok' : 'failed', result);
+  } catch (err) {
+    console.warn('[v2] pollAll error:', err.message);
   } finally {
     state.syncing = false;
   }
@@ -131,6 +133,8 @@ function startPollers() {
 
 async function init() {
   loadState();
+  console.log('[v2] state loaded, accounts:', state.accounts.length, 'active:', state.activeAccountId);
+
   initUi();
   hydrateConnectionFields();
   registerDirectSender(sendDirectChatPayload);
@@ -142,13 +146,16 @@ async function init() {
   renderAll();
 
   if (state.firstAccountRequired || !state.accounts.length) {
+    console.log('[v2] no accounts, opening modal');
     openAccountModal();
   } else {
+    console.log('[v2] ensuring dialog direct connection');
     await ensureSelectedDialogDirect();
     await pollAll();
   }
 
   startPollers();
+  console.log('[v2] init complete, pollers started');
 }
 
 init();
