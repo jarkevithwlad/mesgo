@@ -240,6 +240,8 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
     runtime.directReady = false;
     runtime.makingOffer = false;
     runtime.ignoreOffer = false;
+    runtime.seenSignalIds = {}; // Очищаем чтобы не обрабатывать stale messages
+    runtime.remoteCandidatesQueue = [];
   }
 
   runtime.polite = account.guid.localeCompare(peerGuid) > 0;
@@ -248,6 +250,10 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
   runtime.statusText = 'Идёт пробитие портов';
   runtime.connectionEpoch = Date.now();
   runtime.negotiationStartedAt = Date.now();
+
+  // Игнорируем signal-сообщения которые были отправлены ДО создания этого PC
+  // Это защищает от обработки stale сообщений с сервера
+  runtime.minSignalTimestamp = Date.now();
 
   console.log('[v2] creating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
 
@@ -426,6 +432,17 @@ async function processNegotiationMessage(peerGuid, messageType, payload, peerNic
     const answer = payload && payload.sdp ? payload.sdp : null;
     if (!answer) return false;
 
+    // Проверяем что PC готов принять answer
+    if (pc.signalingState === 'stable') {
+      console.log('[v2] ignoring stale answer for', peerGuid.slice(0, 8), '— PC already stable');
+      return false;
+    }
+
+    if (pc.signalingState !== 'have-local-offer') {
+      console.warn('[v2] unexpected answer in state', pc.signalingState, 'for', peerGuid.slice(0, 8));
+      return false;
+    }
+
     console.log('[v2] received answer for', peerGuid.slice(0, 8), 'signalingState:', pc.signalingState);
 
     try {
@@ -555,6 +572,13 @@ async function handleSignalMessage(message) {
 
   const runtime = getPeerRuntime(peerGuid);
 
+  // Фильтрация stale signal-сообщений: игнорируем сообщения отправленные ДО создания текущего PC
+  const msgTimestampMs = Number(message.timestamp || 0) * 1000;
+  if (runtime.minSignalTimestamp && msgTimestampMs > 0 && msgTimestampMs < runtime.minSignalTimestamp) {
+    console.log('[v2] ignoring stale signal from', peerGuid.slice(0, 8), 'type:', message.type, 'ts:', message.timestamp);
+    return false;
+  }
+
   if (message.guid && runtime.seenSignalIds[message.guid]) return false;
   if (message.guid) runtime.seenSignalIds[message.guid] = Date.now();
 
@@ -583,6 +607,9 @@ async function handleSignalMessage(message) {
     // PC нет или закрыт — создаём
     await ensurePeerConnection(peerGuid, peerNickname);
     console.log('[v2] handshake: created/reused PC for', peerGuid.slice(0, 8));
+
+    // Сбрасываем timestamp чтобы не игнорировать новые сообщения
+    runtime.minSignalTimestamp = Date.now();
 
     saveState();
     emitUiRefresh();

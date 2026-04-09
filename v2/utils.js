@@ -94,6 +94,12 @@ export function nowSeconds() {
   return Math.floor(Date.now() / 1000);
 }
 
+/**
+ * Уникальный ID сессии клиента. Сбрасывается при каждом запуске.
+ * Используется для фильтрации stale signal-сообщений.
+ */
+export const SESSION_ID = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
