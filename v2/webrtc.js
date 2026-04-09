@@ -425,18 +425,18 @@ async function handleDirectPayload(peerGuid, payload) {
     runtime.lastHandshakeAt = Date.now();
     runtime.handshakePending = false;
 
-    // Если DC уже open — ничего не делаем
+    // Если DC уже open — всё работает
     if (runtime.dc?.readyState === 'open') {
       emitUiRefresh();
       return;
     }
 
-    // Пересоздаём PC для чистой negotiation
+    // ВСЕГДА пересоздаём PC при handshake_request — это гарантия renegotiation
     console.log('[v2] handshake: recreating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
     await recreatePeerConnection(peerGuid, peerNickname);
     const pc = runtime.pc;
 
-    // Отправляем handshake_response через СЕРВЕР (DC ещё нет!)
+    // Отправляем ответ
     await sendServerSignal(peerGuid, 'handshake_response', { timestampMs: Date.now() });
 
     // Polite клиент сразу шлёт offer
