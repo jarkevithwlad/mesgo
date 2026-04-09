@@ -122,7 +122,9 @@ async function sendNegotiationMessage(pg, baseType, payload) {
   return result.ok;
 }
 
+export { _ensurePeerConnection as ensurePeerConnection, destroyPC };
 export function getPeerConnection(pg) { return getPeerRuntime(pg).pc; }
+export { sendDirectPayload, sendDirectChatPayload, setRemoteAudioMuted, handleSignalMessage, pollSignalServer, ensureHandshakeLoop, stopHandshakeLoop, ensureRetryLoop, stopRetryLoop, ensureDirectForPeer, getPeerConnectionStatus, clearPeerMedia, closePeerConnection };
 
 function destroyPC(pg) {
   const r = getPeerRuntime(pg);
@@ -131,11 +133,12 @@ function destroyPC(pg) {
   r.makingOffer = false; r.ignoreOffer = false;
   r.seenSignalIds = {}; r.remoteCandidatesQueue = [];
 }
+destroyPC._busy = false;
 
 /**
  * Создаёт или возвращает PC. Если PC уже есть и negotiation идёт — возвращает его.
  */
-async function ensurePeerConnection(pg, nickname) {
+async function _ensurePeerConnection(pg, nickname) {
   const account = getActiveAccount();
   if (!account) return null;
   ensureDialog(pg, nickname);
