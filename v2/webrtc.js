@@ -161,7 +161,18 @@ async function sendNegotiationMessage(peerGuid, baseType, payload) {
   const useDirect = Boolean(runtime.dc && runtime.dc.readyState === 'open');
   const type = getTransportType(baseType, useDirect);
   if (useDirect) return sendDirectPayload(peerGuid, { type, payload });
-  return sendServerSignal(peerGuid, type, payload);
+
+  // Строим signal сообщение и отправляем
+  const message = await buildSignalMessage(type, payload);
+  const { sendGenericSignal, sendGenericMessages } = await import('./api.js');
+
+  // Пробуем STUN endpoint
+  let result = await sendGenericSignal(peerGuid, [message]);
+  if (result.ok) return true;
+
+  // Fallback: messages endpoint
+  result = await sendGenericMessages(peerGuid, [message]);
+  return result.ok;
 }
 
 export function getPeerConnection(peerGuid) { return getPeerRuntime(peerGuid).pc; }
@@ -450,7 +461,29 @@ async function handleDirectPayload(peerGuid, payload) {
     emitUiRefresh();
     return;
   }
-  if (payload.type === 'handshake_response') {
+  if (message.type === 'handshake_response') {
+    const runtime = getPeerRuntime(peerGuid);
+    runtime.lastHandshakeResponseAt = Date.now();
+    runtime.handshakePending = false;
+
+    if (runtime.dc?.readyState === 'open') return true;
+
+    // Polite клиент: если DC нет — шлём offer
+    if (runtime.polite && runtime.pc && (!runtime.dc || runtime.dc.readyState !== 'open')) {
+      console.log('[v2] handshake_response: polite sending offer for', peerGuid.slice(0, 8));
+      try {
+        runtime.makingOffer = true;
+        await runtime.pc.setLocalDescription();
+        await sendNegotiationMessage(peerGuid, 'offer', { sdp: runtime.pc.localDescription });
+      } catch (e) {
+        console.warn('[v2] handshake_response offer error:', e.message);
+      } finally {
+        runtime.makingOffer = false;
+      }
+    }
+    emitUiRefresh();
+    return true;
+  }
     // Impolite клиент получил подтверждение что peer готов — инициируем negotiation
     const runtime = getPeerRuntime(peerGuid);
     runtime.lastHandshakeResponseAt = Date.now();
