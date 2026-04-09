@@ -225,6 +225,15 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
     return runtime.pc;
   }
 
+  // Если ICE уже connected/completed — НЕ пересоздаём (даже если signalingState stable)
+  if (runtime.pc) {
+    const iceState = runtime.pc.iceConnectionState;
+    if (iceState === 'connected' || iceState === 'completed') {
+      console.log('[v2] ICE already', iceState, 'for', peerGuid.slice(0, 8), '— skipping PC creation');
+      return runtime.pc;
+    }
+  }
+
   // Если DC open — PC живой
   if (runtime.pc && runtime.dc && runtime.dc.readyState === 'open') {
     return runtime.pc;
@@ -607,6 +616,16 @@ async function handleSignalMessage(message) {
     // PC нет или закрыт — создаём
     await ensurePeerConnection(peerGuid, peerNickname);
     console.log('[v2] handshake: created/reused PC for', peerGuid.slice(0, 8));
+
+    // Если ICE уже connected но DC закрыт — создаём DataChannel
+    if (runtime.pc && (!runtime.dc || runtime.dc.readyState !== 'open')) {
+      const iceState = runtime.pc.iceConnectionState;
+      if (iceState === 'connected' || iceState === 'completed') {
+        console.log('[v2] handshake: ICE connected but no DC, creating data channel');
+        const dc = runtime.pc.createDataChannel('chat');
+        setupDataChannel(peerGuid, dc);
+      }
+    }
 
     // Сбрасываем timestamp чтобы не игнорировать новые сообщения
     runtime.minSignalTimestamp = Date.now();
