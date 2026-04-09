@@ -418,10 +418,31 @@ async function handleDirectPayload(peerGuid, payload) {
   if (payload.type === 'handshake_request') {
     runtime.lastHandshakeAt = Date.now();
     runtime.handshakePending = false;
-    // Всегда пересоздаём PC при handshake от новой стороны — это гарантия что negotiation начнётся заново
-    console.log('[v2] handshake: recreating PC for', peerGuid.slice(0, 8));
+
+    // Если DC уже open — ничего не делаем
+    if (runtime.dc?.readyState === 'open') {
+      emitUiRefresh();
+      return;
+    }
+
+    // Пересоздаём PC и сразу отправляем свой offer
+    console.log('[v2] handshake: recreating PC and sending offer for', peerGuid.slice(0, 8));
     await recreatePeerConnection(peerGuid, peerNickname);
-    await sendDirectPayload(peerGuid, { type: 'handshake_response', timestampMs: Date.now() });
+    const pc = runtime.pc;
+    if (pc && runtime.polite) {
+      // Polite клиент сразу шлёт offer
+      try {
+        runtime.makingOffer = true;
+        await pc.setLocalDescription();
+        await sendNegotiationMessage(peerGuid, 'offer', { sdp: pc.localDescription });
+        console.log('[v2] handshake: offer sent for', peerGuid.slice(0, 8));
+      } catch (e) {
+        console.warn('[v2] handshake offer error:', e.message);
+      } finally {
+        runtime.makingOffer = false;
+      }
+    }
+
     emitUiRefresh();
     return;
   }
