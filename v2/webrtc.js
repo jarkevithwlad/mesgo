@@ -264,6 +264,21 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
       runtime.statusText = 'Прямое соединение установлено';
       runtime.lastHandshakeAt = Date.now();
       setCallEnabled(peerGuid, true);
+      // Fallback: если ICE connected но DC не открылся за 8 сек — пересоздать PC
+      setTimeout(() => {
+        const r = getPeerRuntime(peerGuid);
+        if (r && r.pc === pc && (!r.dc || r.dc.readyState !== 'open')) {
+          console.log('[v2] ICE connected but DC still not open, recreating PC');
+          try { pc.close(); } catch (_) {}
+          r.pc = null;
+          r.dc = null;
+          r.directReady = false;
+          r.makingOffer = false;
+          r.negotiationStartedAt = Date.now();
+          r.minSignalTimestamp = Date.now();
+          // handshake loop подхватит и пересоздаст
+        }
+      }, 8000);
     } else if (value === 'connecting') {
       runtime.statusText = 'Идёт пробитие портов';
     } else if (value === 'failed') {
@@ -432,25 +447,20 @@ async function processNegotiationMessage(peerGuid, messageType, payload, peerNic
     const answer = payload && payload.sdp ? payload.sdp : null;
     if (!answer) return false;
 
-    // Проверяем что PC готов принять answer
-    if (pc.signalingState === 'stable') {
-      console.log('[v2] ignoring stale answer for', peerGuid.slice(0, 8), '— PC already stable');
-      return false;
-    }
-
+    // Answer нужен только в состоянии have-local-offer
     if (pc.signalingState !== 'have-local-offer') {
-      console.warn('[v2] unexpected answer in state', pc.signalingState, 'for', peerGuid.slice(0, 8));
+      console.log('[v2] ignoring answer for', peerGuid.slice(0, 8), '— signalingState:', pc.signalingState);
       return false;
     }
 
-    console.log('[v2] received answer for', peerGuid.slice(0, 8), 'signalingState:', pc.signalingState);
+    console.log('[v2] received answer for', peerGuid.slice(0, 8));
 
     try {
       await pc.setRemoteDescription(answer);
       await flushQueuedCandidates(runtime);
       console.log('[v2] answer set for', peerGuid.slice(0, 8));
     } catch (e) {
-      console.warn('[v2] answer processing error for', peerGuid.slice(0, 8), ':', e.message);
+      console.warn('[v2] answer error for', peerGuid.slice(0, 8), ':', e.message);
       runtime.statusText = 'Ошибка обработки answer';
       emitUiRefresh();
       return false;
