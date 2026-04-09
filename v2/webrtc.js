@@ -329,33 +329,39 @@ async function processNegotiationMessage(peerGuid, messageType, payload, peerNic
     const offer = payload?.sdp;
     if (!offer) return false;
 
-    // Если PC в stable — другая сторона пересоздала PC, нам тоже нужно
+    // Если DC уже open — соединение уже есть, игнорируем
+    if (runtime.dc?.readyState === 'open') return true;
+
+    // Если PC в stable — принимаем offer БЕЗ пересоздания PC
     if (pc.signalingState === 'stable') {
-      if (runtime.dc?.readyState === 'open') return true; // уже есть соединение
-      console.log('[v2] offer in stable state, recreating PC for', peerGuid.slice(0, 8));
-      await recreatePeerConnection(peerGuid, peerNickname);
-      const newPc = runtime.pc;
-      if (!newPc) return false;
+      try {
+        await pc.setRemoteDescription(offer);
+        await flushQueuedCandidates(runtime);
+        await pc.setLocalDescription(await pc.createAnswer());
+        await sendNegotiationMessage(peerGuid, 'answer', { sdp: pc.localDescription });
+        console.log('[v2] offer accepted on stable PC for', peerGuid.slice(0, 8));
+        return true;
+      } catch (e) {
+        console.warn('[v2] offer on stable failed, recreating PC:', e.message);
+        // Только если ошибка — пересоздаём
+      }
+    }
+
+    // PC нет или ошибка — создаём новый
+    await recreatePeerConnection(peerGuid, peerNickname);
+    const newPc = runtime.pc;
+    if (!newPc) return false;
+
+    try {
       await newPc.setRemoteDescription(offer);
       await flushQueuedCandidates(runtime);
       await newPc.setLocalDescription(await newPc.createAnswer());
       await sendNegotiationMessage(peerGuid, 'answer', { sdp: newPc.localDescription });
       return true;
+    } catch (e) {
+      console.warn('[v2] offer error:', e.message);
+      return false;
     }
-
-    // Collision handling
-    const collision = runtime.makingOffer || pc.signalingState !== 'stable';
-    runtime.ignoreOffer = !runtime.polite && collision;
-    if (runtime.ignoreOffer) return false;
-    if (collision && runtime.polite) {
-      try { await pc.setLocalDescription({ type: 'rollback' }); } catch (_) {}
-    }
-
-    await pc.setRemoteDescription(offer);
-    await flushQueuedCandidates(runtime);
-    await pc.setLocalDescription(await pc.createAnswer());
-    await sendNegotiationMessage(peerGuid, 'answer', { sdp: pc.localDescription });
-    return true;
   }
 
   if (messageType === 'webrtc_answer' || messageType === 'signal_answer') {
