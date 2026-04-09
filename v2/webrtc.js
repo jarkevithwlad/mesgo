@@ -24,7 +24,6 @@ function getPeerNickname(peerGuid) {
 async function buildSignalMessage(type, payload) {
   const account = getActiveAccount();
   const timestamp = nowSeconds();
-
   return {
     guid: (await uuidV5(SIGNAL_NAMESPACE, `${timestamp}|signal|${type}|${Math.random()}`)).toLowerCase(),
     timestamp,
@@ -35,47 +34,33 @@ async function buildSignalMessage(type, payload) {
   };
 }
 
-/**
- * Отправляет signal-сообщение peer'у через фиксированный STUN endpoint.
- */
 async function sendServerSignal(peerGuid, type, payload = {}) {
   const account = getActiveAccount();
   if (!account) return false;
-
   const message = await buildSignalMessage(type, payload);
-
   try {
     const result = await sendGenericSignal(peerGuid, [message]);
     return result.ok;
   } catch (err) {
-    console.warn('[v2] sendServerSignal error:', err.message);
+    console.warn('[v2] signal send error:', err.message);
     return false;
   }
 }
 
 function stopPingLoop(peerGuid) {
   const timer = state.webrtc.pingTimers[peerGuid];
-  if (timer) {
-    clearInterval(timer);
-    delete state.webrtc.pingTimers[peerGuid];
-  }
+  if (timer) { clearInterval(timer); delete state.webrtc.pingTimers[peerGuid]; }
 }
 
 function startPingLoop(peerGuid) {
   const runtime = getPeerRuntime(peerGuid);
   stopPingLoop(peerGuid);
-
   runtime.pingMs = null;
   runtime.lastPongAt = 0;
-
   state.webrtc.pingTimers[peerGuid] = setInterval(() => {
     if (!runtime.dc || runtime.dc.readyState !== 'open') return;
-
     runtime.lastPingSentAt = Date.now();
-    sendDirectPayload(peerGuid, {
-      type: 'ping',
-      timestampMs: runtime.lastPingSentAt
-    }).catch(() => {});
+    sendDirectPayload(peerGuid, { type: 'ping', timestampMs: runtime.lastPingSentAt }).catch(() => {});
   }, 1000);
 }
 
@@ -86,51 +71,38 @@ function setCallEnabled(peerGuid, value) {
 
 function getAudioElement(peerGuid) {
   let audio = hiddenAudioEls[peerGuid];
-
   if (!audio) {
     audio = document.createElement('audio');
-    audio.autoplay = true;
-    audio.playsInline = true;
-    audio.style.display = 'none';
-    audio.muted = true;
+    audio.autoplay = true; audio.playsInline = true;
+    audio.style.display = 'none'; audio.muted = true;
     document.body.appendChild(audio);
     hiddenAudioEls[peerGuid] = audio;
   }
-
   return audio;
 }
 
 export function setRemoteAudioMuted(peerGuid, muted) {
-  const audio = getAudioElement(peerGuid);
-  audio.muted = Boolean(muted);
+  getAudioElement(peerGuid).muted = Boolean(muted);
 }
 
 function attachRemoteAudio(peerGuid, stream) {
   const audio = getAudioElement(peerGuid);
   audio.srcObject = stream;
-
-  const runtime = getPeerRuntime(peerGuid);
-  audio.muted = !runtime.activeCall;
+  audio.muted = !getPeerRuntime(peerGuid).activeCall;
 }
 
 async function flushQueuedCandidates(runtime) {
   if (!runtime.pc || !runtime.pc.remoteDescription || !runtime.remoteCandidatesQueue.length) return;
-
   const queue = [...runtime.remoteCandidatesQueue];
   runtime.remoteCandidatesQueue.length = 0;
-
-  for (const candidate of queue) {
-    try {
-      await runtime.pc.addIceCandidate(candidate);
-    } catch (_) {}
-  }
+  for (const candidate of queue) { try { await runtime.pc.addIceCandidate(candidate); } catch (_) {} }
 }
 
 function setupDataChannel(peerGuid, dc) {
   const runtime = getPeerRuntime(peerGuid);
   runtime.dc = dc;
-
   dc.onopen = () => {
+    console.log('[v2] DC open for', peerGuid.slice(0, 8));
     runtime.directReady = true;
     runtime.status = 'connected';
     runtime.statusText = 'Прямое соединение активно';
@@ -141,7 +113,6 @@ function setupDataChannel(peerGuid, dc) {
     stopHandshakeLoop(peerGuid);
     emitUiRefresh();
   };
-
   dc.onclose = () => {
     runtime.directReady = false;
     runtime.status = 'closed';
@@ -151,18 +122,13 @@ function setupDataChannel(peerGuid, dc) {
     stopPingLoop(peerGuid);
     emitUiRefresh();
   };
-
   dc.onerror = () => {
     runtime.status = 'error';
     runtime.statusText = 'Ошибка прямого канала';
     emitUiRefresh();
   };
-
   dc.onmessage = async (event) => {
-    try {
-      const data = JSON.parse(String(event.data || '{}'));
-      await handleDirectPayload(peerGuid, data);
-    } catch (_) {}
+    try { await handleDirectPayload(peerGuid, JSON.parse(String(event.data || '{}'))); } catch (_) {}
   };
 }
 
@@ -183,135 +149,73 @@ async function sendNegotiationMessage(peerGuid, baseType, payload) {
   const runtime = getPeerRuntime(peerGuid);
   const useDirect = Boolean(runtime.dc && runtime.dc.readyState === 'open');
   const type = getTransportType(baseType, useDirect);
-
-  if (useDirect) {
-    return sendDirectPayload(peerGuid, {
-      type,
-      payload
-    });
-  }
-
+  if (useDirect) return sendDirectPayload(peerGuid, { type, payload });
   return sendServerSignal(peerGuid, type, payload);
 }
 
-export function getPeerConnection(peerGuid) {
-  return getPeerRuntime(peerGuid).pc;
-}
+export function getPeerConnection(peerGuid) { return getPeerRuntime(peerGuid).pc; }
 
 /**
- * Создаёт или возвращит PeerConnection.
- * При создании нового PC — сбрасывает все предыдущие состояния.
+ * Закрывает текущий PC и создаёт новый.
+ * Вызывается только когда нужно полностью начать заново.
  */
-/**
- * Список состояний signalling где negotiation уже в процессе.
- */
-const BUSY_SIGNALING_STATES = new Set([
-  'have-remote-offer',
-  'have-local-offer',
-  'have-local-pranswer',
-  'have-remote-pranswer'
-]);
-
-export async function ensurePeerConnection(peerGuid, peerNickname) {
+async function recreatePeerConnection(peerGuid, peerNickname) {
   const account = getActiveAccount();
   if (!account) return null;
 
-  ensureDialog(peerGuid, peerNickname);
-
   const runtime = getPeerRuntime(peerGuid);
-
-  // Если PC уже есть — НИКОГДА не пересоздаём
+  
+  // Закрываем старый PC
   if (runtime.pc) {
-    return runtime.pc;
+    try { runtime.pc.close(); } catch (_) {}
   }
 
-  // Только "polite" клиент создаёт DataChannel при инициализации.
-  // "Impolite" клиент будет ждать DC от polite (через ondatachannel).
-  // Это предотвращает collision когда оба создают DC одновременно.
+  runtime.pc = null;
+  runtime.dc = null;
+  runtime.directReady = false;
+  runtime.makingOffer = false;
+  runtime.ignoreOffer = false;
+  runtime.seenSignalIds = {};
+  runtime.remoteCandidatesQueue = [];
+  runtime.minSignalTimestamp = Date.now();
+  runtime.negotiationStartedAt = Date.now();
   runtime.polite = account.guid.localeCompare(peerGuid) > 0;
-  runtime.isInitiator = false;
   runtime.status = 'connecting';
   runtime.statusText = 'Идёт пробитие портов';
-  runtime.connectionEpoch = Date.now();
-  runtime.negotiationStartedAt = Date.now();
-  runtime.minSignalTimestamp = Date.now();
 
-  console.log('[v2] creating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
+  console.log('[v2] recreating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
   runtime.pc = pc;
 
   pc.onicecandidate = async (event) => {
     if (!event.candidate) return;
-    const c = event.candidate.candidate;
-    const parts = c.split(' ');
-    const type = parts[6]; // host, srflx, prflx, relay
-    const addr = parts[4];
-    console.log('[v2] ICE candidate for', peerGuid.slice(0, 8), '| type:', type, '| addr:', addr);
-    try {
-      await sendNegotiationMessage(peerGuid, 'ice', { candidate: event.candidate });
-    } catch (e) {
-      console.warn('[v2] ICE send error:', e.message);
-    }
+    try { await sendNegotiationMessage(peerGuid, 'ice', { candidate: event.candidate }); } catch (_) {}
   };
 
   pc.onconnectionstatechange = () => {
     const value = pc.connectionState;
-    console.log('[v2] connectionState for', peerGuid.slice(0, 8), ':', value);
     runtime.status = value;
-
     if (value === 'connected') {
       runtime.statusText = 'Прямое соединение установлено';
       runtime.lastHandshakeAt = Date.now();
       setCallEnabled(peerGuid, true);
-      // Fallback: если ICE connected но DC не открылся за 8 сек — пересоздать PC
-      setTimeout(() => {
-        const r = getPeerRuntime(peerGuid);
-        if (r && r.pc === pc && (!r.dc || r.dc.readyState !== 'open')) {
-          console.log('[v2] ICE connected but DC still not open, recreating PC');
-          try { pc.close(); } catch (_) {}
-          r.pc = null;
-          r.dc = null;
-          r.directReady = false;
-          r.makingOffer = false;
-          r.negotiationStartedAt = Date.now();
-          r.minSignalTimestamp = Date.now();
-          // handshake loop подхватит и пересоздаст
-        }
-      }, 8000);
     } else if (value === 'connecting') {
       runtime.statusText = 'Идёт пробитие портов';
     } else if (value === 'failed') {
       runtime.statusText = 'Не удалось установить прямую связь';
-      runtime.directReady = false;
-      runtime.pingMs = null;
-      setCallEnabled(peerGuid, false);
     } else if (value === 'disconnected') {
       runtime.statusText = 'Прямая связь потеряна';
-      runtime.directReady = false;
-      runtime.pingMs = null;
-      setCallEnabled(peerGuid, false);
       ensureHandshakeLoop(peerGuid, peerNickname);
-    } else if (value === 'closed') {
-      runtime.statusText = 'Соединение закрыто';
-      runtime.directReady = false;
-      runtime.pingMs = null;
-      setCallEnabled(peerGuid, false);
     }
     emitUiRefresh();
   };
 
   pc.oniceconnectionstatechange = () => {
-    const iceState = pc.iceConnectionState;
-    console.log('[v2] iceConnectionState for', peerGuid.slice(0, 8), ':', iceState);
-
-    if (iceState === 'checking') {
-      runtime.statusText = 'Проверка прямого маршрута';
-    } else if (iceState === 'connected' || iceState === 'completed') {
-      runtime.statusText = 'Прямой маршрут подтверждён';
-    } else if (iceState === 'failed') {
-      runtime.statusText = 'Не удалось пробить порты';
-    }
+    const ice = pc.iceConnectionState;
+    if (ice === 'checking') runtime.statusText = 'Проверка прямого маршрута';
+    else if (ice === 'connected' || ice === 'completed') runtime.statusText = 'Прямой маршрут подтверждён';
+    else if (ice === 'failed') runtime.statusText = 'Не удалось пробить порты';
     emitUiRefresh();
   };
 
@@ -321,9 +225,8 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
   };
 
   pc.ontrack = (event) => {
-    const stream = event.streams && event.streams[0] ? event.streams[0] : null;
+    const stream = event.streams?.[0];
     if (!stream) return;
-    console.log('[v2] ontrack for', peerGuid.slice(0, 8));
     runtime.remoteStream = stream;
     attachRemoteAudio(peerGuid, stream);
     emitUiRefresh();
@@ -334,14 +237,9 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
     try {
       runtime.makingOffer = true;
       await pc.setLocalDescription();
-      console.log('[v2] sending offer for', peerGuid.slice(0, 8));
-      await sendNegotiationMessage(peerGuid, 'offer', {
-        sdp: pc.localDescription
-      });
+      await sendNegotiationMessage(peerGuid, 'offer', { sdp: pc.localDescription });
     } catch (e) {
-      console.warn('[v2] negotiation error for', peerGuid.slice(0, 8), ':', e.message);
-      runtime.statusText = 'Ошибка согласования соединения';
-      emitUiRefresh();
+      console.warn('[v2] negotiation error:', e.message);
     } finally {
       runtime.makingOffer = false;
     }
@@ -350,37 +248,47 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
   return pc;
 }
 
-export async function initiateDirectPeer(peerGuid, peerNickname) {
+export async function ensurePeerConnection(peerGuid, peerNickname) {
+  const account = getActiveAccount();
+  if (!account) return null;
+  ensureDialog(peerGuid, peerNickname);
+
   const runtime = getPeerRuntime(peerGuid);
 
-  // Если DC уже open — ничего не делаем
-  if (runtime.dc && runtime.dc.readyState === 'open') {
-    return true;
-  }
-
-  // Если PC есть — НЕ пересоздаём
-  if (runtime.pc) {
-    // Если DC нет — создаём ТОЛЬКО если мы polite клиент
-    // Impolite клиент ждёт DC от polite (через ondatachannel)
-    if (runtime.polite && (!runtime.dc || runtime.dc.readyState === 'closed')) {
-      console.log('[v2] initiateDirectPeer: polite creating DC for', peerGuid.slice(0, 8));
-      const dc = runtime.pc.createDataChannel('chat');
-      setupDataChannel(peerGuid, dc);
-    }
+  // Если DC уже open — всё готово
+  if (runtime.pc && runtime.dc && runtime.dc.readyState === 'open') {
     return runtime.pc;
   }
 
-  // PC нет — создаём новый
-  const pc = await ensurePeerConnection(peerGuid, peerNickname);
+  // Если PC есть и negotiation в процессе — НЕ пересоздаём
+  const busyStates = new Set(['have-remote-offer', 'have-local-offer', 'have-local-pranswer', 'have-remote-pranswer']);
+  if (runtime.pc && busyStates.has(runtime.pc.signalingState)) {
+    return runtime.pc;
+  }
+
+  // Если ICE уже connected — НЕ пересоздаём
+  if (runtime.pc) {
+    const ice = runtime.pc.iceConnectionState;
+    if (ice === 'connected' || ice === 'completed') return runtime.pc;
+    if (ice === 'checking' || ice === 'new') return runtime.pc; // ждём
+  }
+
+  // Если PC есть — закрываем и создаём новый
+  return recreatePeerConnection(peerGuid, peerNickname);
+}
+
+export async function initiateDirectPeer(peerGuid, peerNickname) {
+  const runtime = getPeerRuntime(peerGuid);
+  if (runtime.dc && runtime.dc.readyState === 'open') return true;
+  if (runtime.pc) return runtime.pc; // PC уже есть, negotiation идёт
+
+  const pc = await recreatePeerConnection(peerGuid, peerNickname);
   if (!pc) return false;
 
   runtime.isInitiator = true;
-  runtime.status = 'connecting';
-  runtime.statusText = 'Идёт пробитие портов';
-
-  // Только polite клиент создаёт DC — impolite получит через ondatachannel
+  // Только polite клиент создаёт DC
   if (runtime.polite) {
-    console.log('[v2] initiateDirectPeer: polite creating DC on new PC for', peerGuid.slice(0, 8));
+    console.log('[v2] polite: creating DC for', peerGuid.slice(0, 8));
     const dc = pc.createDataChannel('chat');
     setupDataChannel(peerGuid, dc);
   }
@@ -391,99 +299,74 @@ export async function initiateDirectPeer(peerGuid, peerNickname) {
 export async function sendDirectPayload(peerGuid, payload) {
   const runtime = getPeerRuntime(peerGuid);
   if (!runtime.dc || runtime.dc.readyState !== 'open') return false;
-
   runtime.dc.send(JSON.stringify(payload));
   return true;
 }
 
 export async function sendDirectChatPayload(peerGuid, payload) {
-  const sent = await sendDirectPayload(peerGuid, payload);
-  return sent;
+  return sendDirectPayload(peerGuid, payload);
 }
 
 async function processNegotiationMessage(peerGuid, messageType, payload, peerNickname) {
   const account = getActiveAccount();
   if (!account) return false;
-
   const runtime = getPeerRuntime(peerGuid);
-  await ensurePeerConnection(peerGuid, peerNickname);
-  const pc = runtime.pc;
+  const pc = await ensurePeerConnection(peerGuid, peerNickname);
+  if (!pc) return false;
 
   if (messageType === 'webrtc_offer' || messageType === 'signal_offer') {
-    const offer = payload && payload.sdp ? payload.sdp : null;
+    const offer = payload?.sdp;
     if (!offer) return false;
 
-    const offerCollision = runtime.makingOffer || pc.signalingState !== 'stable';
-    runtime.ignoreOffer = !runtime.polite && offerCollision;
-    if (runtime.ignoreOffer) return false;
-
-    try {
-      // Polite client: rollback local offer перед accept remote offer
-      if (offerCollision && runtime.polite) {
-        console.log('[v2] polite client rolling back local offer for', peerGuid.slice(0, 8));
-        await pc.setLocalDescription({ type: 'rollback' });
-      }
-
-      await pc.setRemoteDescription(offer);
+    // Если PC в stable — другая сторона пересоздала PC, нам тоже нужно
+    if (pc.signalingState === 'stable') {
+      if (runtime.dc?.readyState === 'open') return true; // уже есть соединение
+      console.log('[v2] offer in stable state, recreating PC for', peerGuid.slice(0, 8));
+      await recreatePeerConnection(peerGuid, peerNickname);
+      const newPc = runtime.pc;
+      if (!newPc) return false;
+      await newPc.setRemoteDescription(offer);
       await flushQueuedCandidates(runtime);
-      await pc.setLocalDescription(await pc.createAnswer());
-
-      await sendNegotiationMessage(peerGuid, 'answer', {
-        sdp: pc.localDescription
-      });
-    } catch (e) {
-      console.warn('[v2] offer processing error for', peerGuid.slice(0, 8), ':', e.message);
-      runtime.statusText = 'Ошибка обработки offer';
-      emitUiRefresh();
-      return false;
+      await newPc.setLocalDescription(await newPc.createAnswer());
+      await sendNegotiationMessage(peerGuid, 'answer', { sdp: newPc.localDescription });
+      return true;
     }
 
-    runtime.statusText = 'Получен запрос соединения';
-    emitUiRefresh();
+    // Collision handling
+    const collision = runtime.makingOffer || pc.signalingState !== 'stable';
+    runtime.ignoreOffer = !runtime.polite && collision;
+    if (runtime.ignoreOffer) return false;
+    if (collision && runtime.polite) {
+      try { await pc.setLocalDescription({ type: 'rollback' }); } catch (_) {}
+    }
+
+    await pc.setRemoteDescription(offer);
+    await flushQueuedCandidates(runtime);
+    await pc.setLocalDescription(await pc.createAnswer());
+    await sendNegotiationMessage(peerGuid, 'answer', { sdp: pc.localDescription });
     return true;
   }
 
   if (messageType === 'webrtc_answer' || messageType === 'signal_answer') {
-    const answer = payload && payload.sdp ? payload.sdp : null;
-    if (!answer) return false;
-
-    // Answer нужен только в состоянии have-local-offer
-    if (pc.signalingState !== 'have-local-offer') {
-      console.log('[v2] ignoring answer for', peerGuid.slice(0, 8), '— signalingState:', pc.signalingState);
-      return false;
-    }
-
-    console.log('[v2] received answer for', peerGuid.slice(0, 8));
-
+    const answer = payload?.sdp;
+    if (!answer || pc.signalingState !== 'have-local-offer') return false;
     try {
       await pc.setRemoteDescription(answer);
       await flushQueuedCandidates(runtime);
-      console.log('[v2] answer set for', peerGuid.slice(0, 8));
     } catch (e) {
-      console.warn('[v2] answer error for', peerGuid.slice(0, 8), ':', e.message);
-      runtime.statusText = 'Ошибка обработки answer';
-      emitUiRefresh();
+      console.warn('[v2] answer error:', e.message);
       return false;
     }
-
-    runtime.statusText = 'Получен ответ соединения';
-    emitUiRefresh();
     return true;
   }
 
   if (messageType === 'webrtc_ice_candidate' || messageType === 'signal_ice') {
-    const candidate = payload && payload.candidate ? payload.candidate : null;
+    const candidate = payload?.candidate;
     if (!candidate) return false;
-
     try {
-      if (pc.remoteDescription) {
-        await pc.addIceCandidate(candidate);
-      } else {
-        runtime.remoteCandidatesQueue.push(candidate);
-      }
+      if (pc.remoteDescription) await pc.addIceCandidate(candidate);
+      else runtime.remoteCandidatesQueue.push(candidate);
     } catch (_) {}
-
-    await flushQueuedCandidates(runtime);
     return true;
   }
 
@@ -495,76 +378,49 @@ async function handleDirectPayload(peerGuid, payload) {
   const peerNickname = getPeerNickname(peerGuid);
   if (!payload || typeof payload !== 'object') return;
 
-  // ACK-механизм для сообщений
   if (payload.type === 'msg_ack' && payload.msg_guid) {
     handleMsgAck(peerGuid, payload.msg_guid);
     emitUiRefresh();
     return;
   }
-
   if (payload.type === 'chat_message' && payload.message) {
     receiveDirectChatMessage(peerGuid, peerNickname, payload.message);
     runtime.lastDirectMessageAt = Date.now();
     emitUiRefresh();
     return;
   }
-
   if (payload.type === 'ping') {
-    await sendDirectPayload(peerGuid, {
-      type: 'pong',
-      timestampMs: payload.timestampMs,
-      nowMs: Date.now()
-    });
+    await sendDirectPayload(peerGuid, { type: 'pong', timestampMs: payload.timestampMs, nowMs: Date.now() });
     return;
   }
-
   if (payload.type === 'pong') {
     const sent = Number(payload.timestampMs || 0);
-    if (sent) {
-      runtime.pingMs = Math.max(0, Date.now() - sent);
-      runtime.lastPongAt = Date.now();
-      emitUiRefresh();
-    }
+    if (sent) { runtime.pingMs = Math.max(0, Date.now() - sent); runtime.lastPongAt = Date.now(); emitUiRefresh(); }
     return;
   }
-
-  // Handshake mechanism
   if (payload.type === 'handshake_request') {
     runtime.lastHandshakeAt = Date.now();
     runtime.handshakePending = false;
-
-    // Если нет активного соединения — создаём и шлём response
-    if (!runtime.directReady || !runtime.pc) {
-      await ensurePeerConnection(peerGuid, peerNickname);
-      // onnegotiationneeded сам отправит offer
+    const pc = await ensurePeerConnection(peerGuid, peerNickname);
+    if (pc && (!runtime.dc || runtime.dc.readyState !== 'open') && runtime.polite) {
+      const dc = pc.createDataChannel('chat');
+      setupDataChannel(peerGuid, dc);
     }
-
-    // Отправляем handshake_response
-    await sendDirectPayload(peerGuid, {
-      type: 'handshake_response',
-      timestampMs: Date.now()
-    });
+    await sendDirectPayload(peerGuid, { type: 'handshake_response', timestampMs: Date.now() });
     emitUiRefresh();
     return;
   }
-
   if (payload.type === 'handshake_response') {
     runtime.lastHandshakeResponseAt = Date.now();
     runtime.handshakePending = false;
     emitUiRefresh();
     return;
   }
-
-  if (
-    payload.type === 'signal_offer' ||
-    payload.type === 'signal_answer' ||
-    payload.type === 'signal_ice'
-  ) {
+  if (['signal_offer', 'signal_answer', 'signal_ice'].includes(payload.type)) {
     await processNegotiationMessage(peerGuid, payload.type, payload.payload || {}, peerNickname);
     return;
   }
-
-  if (payload.type && payload.type.startsWith('call_')) {
+  if (payload.type?.startsWith('call_')) {
     const calls = await import('./calls.js');
     await calls.handleDirectCallControl(peerGuid, payload);
     emitUiRefresh();
@@ -573,172 +429,67 @@ async function handleDirectPayload(peerGuid, payload) {
 
 async function handleSignalMessage(message) {
   const account = getActiveAccount();
-  if (!account || !message || typeof message !== 'object') return false;
-  if (!message.type) return false;
-
+  if (!account || !message?.type) return false;
   const peerGuid = String(message.from_guid || '').toLowerCase();
   const peerNickname = String(message.from_nickname || '').trim() || getPeerNickname(peerGuid);
   if (!peerGuid || peerGuid === account.guid) return false;
-
   const runtime = getPeerRuntime(peerGuid);
-
-  // Фильтрация stale ICE кандидатов: игнорируем кандидатов отправленные ДО создания текущего PC
-  // Но offer/answer/handshake ВСЕГДА обрабатываем (они могут быть из старой сессии но это ок — renegotiation их отфильтрует)
-  const msgTimestampMs = Number(message.timestamp || 0) * 1000;
-  const isNonCritical = message.type === 'webrtc_ice_candidate' || message.type === 'signal_ice';
-  if (isNonCritical && runtime.minSignalTimestamp && msgTimestampMs > 0 && msgTimestampMs < runtime.minSignalTimestamp) {
-    console.log('[v2] ignoring stale ICE from', peerGuid.slice(0, 8), 'ts:', message.timestamp);
-    return false;
-  }
 
   if (message.guid && runtime.seenSignalIds[message.guid]) return false;
   if (message.guid) runtime.seenSignalIds[message.guid] = Date.now();
 
-  // Handshake request — специальный обработчик
+  // Stale ICE filter
+  const msgTs = Number(message.timestamp || 0) * 1000;
+  if (['webrtc_ice_candidate', 'signal_ice'].includes(message.type) &&
+      runtime.minSignalTimestamp && msgTs > 0 && msgTs < runtime.minSignalTimestamp) {
+    return false;
+  }
+
+  if (['webrtc_offer', 'webrtc_answer', 'webrtc_ice_candidate', 'signal_offer', 'signal_answer', 'signal_ice'].includes(message.type)) {
+    return processNegotiationMessage(peerGuid, message.type, message.payload || {}, peerNickname);
+  }
   if (message.type === 'handshake_request') {
-    console.log('[v2] received handshake_request from', peerGuid.slice(0, 8),
-      'PC:', !!runtime.pc, 'DC:', runtime.dc?.readyState);
-    runtime.lastHandshakeAt = Date.now();
-    runtime.handshakePending = false;
-
-    // Если DC уже open — ничего не делаем
-    if (runtime.dc && runtime.dc.readyState === 'open') {
-      saveState();
-      emitUiRefresh();
-      return true;
-    }
-
-    // Если PC существует — НЕ вызываем ensurePeerConnection (он пересоздаёт PC!)
-    // Только создаём DC если его нет
-    if (runtime.pc) {
-      const signalingState = runtime.pc.signalingState;
-      const iceState = runtime.pc.iceConnectionState;
-      
-      // Если ICE connected/completed — НЕ создаём DC повторно, он откроется сам
-      if (iceState === 'connected' || iceState === 'completed') {
-        console.log('[v2] handshake: ICE', iceState, 'for', peerGuid.slice(0, 8), '— waiting for DC open');
-        saveState();
-        emitUiRefresh();
-        return true;
-      }
-      
-      // Если negotiation в процессе (have-remote-offer / have-local-offer) — ждём
-      if (BUSY_SIGNALING_STATES.has(signalingState)) {
-        saveState();
-        emitUiRefresh();
-        return true;
-      }
-      
-      // Если DC уже есть (даже в состоянии connecting) — НЕ создаём новый
-      if (runtime.dc && runtime.dc.readyState !== 'closed') {
-        saveState();
-        emitUiRefresh();
-        return true;
-      }
-      
-      // Если PC в stable и DC нет — создаём DC ТОЛЬКО если мы polite клиент
-      if (signalingState === 'stable' && runtime.polite) {
-        console.log('[v2] handshake: polite creating DC on stable PC for', peerGuid.slice(0, 8));
-        const dc = runtime.pc.createDataChannel('chat');
-        setupDataChannel(peerGuid, dc);
-      }
-      
-      saveState();
-      emitUiRefresh();
-      return true;
-    }
-
-    // PC нет — создаём с нуля
-    console.log('[v2] handshake: no PC, creating for', peerGuid.slice(0, 8));
-    await ensurePeerConnection(peerGuid, peerNickname);
-    runtime.minSignalTimestamp = Date.now();
-
-    // Создаём DC на новом PC
-    if (runtime.pc && (!runtime.dc || runtime.dc.readyState !== 'open')) {
-      console.log('[v2] handshake: creating DC on new PC for', peerGuid.slice(0, 8));
-      const dc = runtime.pc.createDataChannel('chat');
-      setupDataChannel(peerGuid, dc);
-    }
-
-    saveState();
-    emitUiRefresh();
+    console.log('[v2] handshake_request from', peerGuid.slice(0, 8));
+    const pc = await ensurePeerConnection(peerGuid, peerNickname);
+    // Ответим через DataChannel когда откроется
     return true;
   }
-
-  if (
-    message.type === 'webrtc_offer' ||
-    message.type === 'webrtc_answer' ||
-    message.type === 'webrtc_ice_candidate' ||
-    message.type === 'signal_offer' ||
-    message.type === 'signal_answer' ||
-    message.type === 'signal_ice'
-  ) {
-    const handled = await processNegotiationMessage(peerGuid, message.type, message.payload || {}, peerNickname);
-    saveState();
-    return handled;
-  }
-
   return false;
 }
 
 export async function pollSignalServer() {
   const account = getActiveAccount();
   if (!account) return { ok: false, skipped: true };
-
   let anyChanged = false;
-
   try {
     const result = await pullSignalMessages();
-    if (result.ok && result.result && result.result.data) {
-      const incoming = Array.isArray(result.result.data.messages) ? result.result.data.messages : [];
-      for (const item of incoming) {
-        const handled = await handleSignalMessage(item);
-        anyChanged = anyChanged || handled;
+    if (result.ok && result.result?.data) {
+      for (const item of (result.result.data.messages || [])) {
+        anyChanged = anyChanged || await handleSignalMessage(item);
       }
     }
-  } catch (err) {
-    console.warn('[v2] signal poll error:', err.message);
-  }
-
-  if (anyChanged) {
-    saveState();
-    emitUiRefresh();
-  }
-
+  } catch (err) { console.warn('[v2] signal poll error:', err.message); }
+  if (anyChanged) { saveState(); emitUiRefresh(); }
   return { ok: true, changed: anyChanged };
 }
 
-// ===== HANDSHAKE MECHANISM =====
+// ===== HANDSHAKE =====
 
 export function ensureHandshakeLoop(peerGuid, peerNickname) {
   if (state.webrtc.handshakeTimers[peerGuid]) return;
-
-  console.log('[v2] handshake loop started for', peerGuid.slice(0, 8));
-
   state.webrtc.handshakeTimers[peerGuid] = setInterval(() => {
     const runtime = getPeerRuntime(peerGuid);
+    if (!runtime) return;
     const selectedPeerGuid = getSelectedPeerGuid();
-    const shouldWork = selectedPeerGuid === peerGuid || runtime.callState !== 'idle';
-
-    if (!shouldWork) return;
     if (runtime.directReady) return;
-
-    // Убрал negotiation stuck timer — он убивал активные соединения
-    // WebRTC сам разберётся с reconnect
-
+    if (selectedPeerGuid !== peerGuid && runtime.callState === 'idle') return;
     if (runtime.handshakePending) return;
 
-    console.log('[v2] sending handshake_request to', peerGuid.slice(0, 8));
     runtime.handshakePending = true;
     runtime.lastHandshakeSentAt = Date.now();
-    sendServerSignal(peerGuid, 'handshake_request', {
-      timestampMs: Date.now()
-    }).then((ok) => {
-      console.log('[v2] handshake sent:', ok);
-    }).catch((err) => {
-      console.warn('[v2] handshake send error:', err.message);
-      runtime.handshakePending = false;
-    });
+    sendServerSignal(peerGuid, 'handshake_request', { timestampMs: Date.now() })
+      .then(ok => { if (!ok) runtime.handshakePending = false; })
+      .catch(() => { runtime.handshakePending = false; });
   }, HANDSHAKE_INTERVAL);
 }
 
@@ -751,15 +502,11 @@ export function stopHandshakeLoop(peerGuid) {
 
 export function ensureRetryLoop(peerGuid, peerNickname) {
   if (state.webrtc.retryTimers[peerGuid]) return;
-
   state.webrtc.retryTimers[peerGuid] = setInterval(() => {
     const runtime = getPeerRuntime(peerGuid);
+    if (!runtime || runtime.directReady) return;
     const selectedPeerGuid = getSelectedPeerGuid();
-    const shouldWork = selectedPeerGuid === peerGuid || runtime.callState !== 'idle';
-
-    if (!shouldWork) return;
-    if (runtime.directReady) return;
-
+    if (selectedPeerGuid !== peerGuid && runtime.callState === 'idle') return;
     initiateDirectPeer(peerGuid, peerNickname).catch(() => {});
   }, WEBRTC_RETRY_INTERVAL);
 }
@@ -773,18 +520,7 @@ export function stopRetryLoop(peerGuid) {
 
 export async function ensureDirectForPeer(peerGuid, peerNickname) {
   const runtime = getPeerRuntime(peerGuid);
-  console.log('[v2] ensureDirectForPeer', peerGuid.slice(0, 8), 'directReady:', runtime.directReady, 'PC:', !!runtime.pc, 'DC:', runtime.dc?.readyState);
-
   if (runtime.directReady) return true;
-
-  // Если PC есть — НЕ пересоздаём, только запускаем handshake loop
-  if (runtime.pc) {
-    console.log('[v2] ensureDirectForPeer: PC exists, starting handshake loop');
-    ensureHandshakeLoop(peerGuid, peerNickname);
-    return true;
-  }
-
-  // PC нет — создаём с нуля
   await initiateDirectPeer(peerGuid, peerNickname);
   ensureRetryLoop(peerGuid, peerNickname);
   ensureHandshakeLoop(peerGuid, peerNickname);
@@ -792,79 +528,47 @@ export async function ensureDirectForPeer(peerGuid, peerNickname) {
 }
 
 export function getPeerConnectionStatus(peerGuid) {
-  const runtime = getPeerRuntime(peerGuid);
-
+  const r = getPeerRuntime(peerGuid);
   return {
-    status: runtime.status,
-    statusText: runtime.statusText,
-    pingMs: runtime.directReady ? runtime.pingMs : null,
-    directReady: runtime.directReady,
-    callEnabled: runtime.callEnabled && runtime.directReady,
-    pendingMessagesCount: Object.keys(runtime.pendingMessages || {}).length,
-    handshakePending: runtime.handshakePending
+    status: r.status, statusText: r.statusText,
+    pingMs: r.directReady ? r.pingMs : null,
+    directReady: r.directReady,
+    callEnabled: r.callEnabled && r.directReady,
+    pendingMessagesCount: Object.keys(r.pendingMessages || {}).length,
+    handshakePending: r.handshakePending
   };
 }
 
 export function clearPeerMedia(peerGuid) {
   const runtime = getPeerRuntime(peerGuid);
   const pc = runtime.pc;
-
   if (pc) {
     try {
-      pc.getSenders().forEach((sender) => {
-        if (sender.track && sender.track.kind === 'audio') {
-          try {
-            pc.removeTrack(sender);
-          } catch (_) {}
-          try {
-            sender.track.stop();
-          } catch (_) {}
-        }
+      pc.getSenders().forEach(s => {
+        if (s.track?.kind === 'audio') { try { pc.removeTrack(s); s.track.stop(); } catch (_) {} }
       });
     } catch (_) {}
   }
-
   if (runtime.localStream) {
-    try {
-      runtime.localStream.getTracks().forEach((t) => t.stop());
-    } catch (_) {}
+    try { runtime.localStream.getTracks().forEach(t => t.stop()); } catch (_) {}
     runtime.localStream = null;
   }
-
   runtime.remoteStream = null;
   runtime.audioEnabled = true;
-
   const audio = hiddenAudioEls[peerGuid];
-  if (audio) {
-    audio.muted = true;
-    audio.srcObject = null;
-  }
-
+  if (audio) { audio.muted = true; audio.srcObject = null; }
   emitUiRefresh();
 }
 
 export async function closePeerConnection(peerGuid) {
   const runtime = getPeerRuntime(peerGuid);
-
   stopPingLoop(peerGuid);
   stopRetryLoop(peerGuid);
   stopHandshakeLoop(peerGuid);
   clearPeerMedia(peerGuid);
-
-  if (runtime.dc) {
-    try { runtime.dc.close(); } catch (_) {}
-  }
-
-  if (runtime.pc) {
-    try { runtime.pc.close(); } catch (_) {}
-  }
-
-  if (hiddenAudioEls[peerGuid]) {
-    hiddenAudioEls[peerGuid].remove();
-    delete hiddenAudioEls[peerGuid];
-  }
-
-  // Clear peer runtime completely (timers handled in clearPeerRuntime)
+  if (runtime.dc) { try { runtime.dc.close(); } catch (_) {} }
+  if (runtime.pc) { try { runtime.pc.close(); } catch (_) {} }
+  if (hiddenAudioEls[peerGuid]) { hiddenAudioEls[peerGuid].remove(); delete hiddenAudioEls[peerGuid]; }
   const { clearPeerRuntime } = await import('./state.js');
   clearPeerRuntime(peerGuid);
   emitUiRefresh();
