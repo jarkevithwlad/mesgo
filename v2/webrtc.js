@@ -199,6 +199,11 @@ async function _ensurePeerConnection(pg, nickname) {
     r.remoteStream = s; attachRemoteAudio(pg, s); emitUiRefresh();
   };
   pc.onnegotiationneeded = async () => {
+    // Только polite клиент инициирует negotiation
+    if (!r.polite) {
+      console.log('[v2] onnegotiationneeded ignored (impolite) for', pg.slice(0, 8));
+      return;
+    }
     console.log('[v2] onnegotiationneeded for', pg.slice(0, 8));
     try {
       r.makingOffer = true;
@@ -214,9 +219,9 @@ async function _ensurePeerConnection(pg, nickname) {
 export async function initiateDirectPeer(pg, nickname) {
   const r = getPeerRuntime(pg);
   if (r.dc && r.dc.readyState === 'open') return true;
-  if (r.pc && !destroyPC._busy) {
-    // PC есть — пробуем создать DC
-    if (!r.dc || r.dc.readyState === 'closed') {
+  if (r.pc) {
+    // Только polite клиент создаёт DC
+    if (r.polite && (!r.dc || r.dc.readyState === 'closed')) {
       const dc = r.pc.createDataChannel('chat');
       setupDataChannel(pg, dc);
     }
@@ -225,8 +230,11 @@ export async function initiateDirectPeer(pg, nickname) {
   const pc = await _ensurePeerConnection(pg, nickname);
   if (!pc) return false;
   r.isInitiator = true; r.status = 'connecting'; r.statusText = 'Идёт пробитие портов';
-  const dc = pc.createDataChannel('chat');
-  setupDataChannel(pg, dc);
+  // Только polite клиент создаёт DC — onnegotiationneeded сам отправит offer
+  if (r.polite) {
+    const dc = pc.createDataChannel('chat');
+    setupDataChannel(pg, dc);
+  }
   emitUiRefresh();
   return true;
 }
@@ -386,29 +394,22 @@ export function ensureHandshakeLoop(pg, nickname) {
     const sel = getSelectedPeerGuid();
     if (sel !== pg && r.callState === 'idle') return;
 
-    // Если PC есть и ICE в активном состоянии — НЕ трогаем
+    // Если PC есть и ICE в процессе или negotiation идёт — НЕ трогаем
     if (r.pc) {
       const ice = r.pc.iceConnectionState;
       if (ice === 'checking' || ice === 'connected' || ice === 'completed') return;
-      // Если negotiation в процессе — НЕ трогаем
       const busy = new Set(['have-remote-offer', 'have-local-offer', 'have-local-pranswer', 'have-remote-pranswer']);
       if (busy.has(r.pc.signalingState)) return;
-      // Если PC создан менее 8 сек назад — НЕ трогаем, даём время на ICE
-      if (r.negotiationStartedAt && (Date.now() - r.negotiationStartedAt) < 8000) return;
+      // Если PC создан менее 10 сек назад — ждём
+      if (r.negotiationStartedAt && (Date.now() - r.negotiationStartedAt) < 10000) return;
     }
 
-    // Только если прошло > 8 сек и ICE не checking — пересоздаём
-    if (!r.handshakePending) {
+    // Только polite клиент пересоздаёт PC и шлёт offer
+    if (!r.handshakePending && r.polite) {
       r.handshakePending = true;
       console.log('[v2] handshake: recreating PC for', pg.slice(0, 8));
       destroyPC(pg);
       _ensurePeerConnection(pg, nickname).then(pc => {
-        if (pc && r.polite) {
-          r.makingOffer = true;
-          pc.setLocalDescription().then(() => {
-            sendNegotiationMessage(pg, 'offer', { sdp: pc.localDescription });
-          }).catch(() => {}).finally(() => { r.makingOffer = false; });
-        }
         r.handshakePending = false;
       }).catch(() => { r.handshakePending = false; });
     }
