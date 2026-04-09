@@ -581,10 +581,12 @@ async function handleSignalMessage(message) {
 
   const runtime = getPeerRuntime(peerGuid);
 
-  // Фильтрация stale signal-сообщений: игнорируем сообщения отправленные ДО создания текущего PC
+  // Фильтрация stale ICE кандидатов: игнорируем кандидатов отправленные ДО создания текущего PC
+  // Но offer/answer/handshake ВСЕГДА обрабатываем (они могут быть из старой сессии но это ок — renegotiation их отфильтрует)
   const msgTimestampMs = Number(message.timestamp || 0) * 1000;
-  if (runtime.minSignalTimestamp && msgTimestampMs > 0 && msgTimestampMs < runtime.minSignalTimestamp) {
-    console.log('[v2] ignoring stale signal from', peerGuid.slice(0, 8), 'type:', message.type, 'ts:', message.timestamp);
+  const isNonCritical = message.type === 'webrtc_ice_candidate' || message.type === 'signal_ice';
+  if (isNonCritical && runtime.minSignalTimestamp && msgTimestampMs > 0 && msgTimestampMs < runtime.minSignalTimestamp) {
+    console.log('[v2] ignoring stale ICE from', peerGuid.slice(0, 8), 'ts:', message.timestamp);
     return false;
   }
 
@@ -617,14 +619,11 @@ async function handleSignalMessage(message) {
     await ensurePeerConnection(peerGuid, peerNickname);
     console.log('[v2] handshake: created/reused PC for', peerGuid.slice(0, 8));
 
-    // Если ICE уже connected но DC закрыт — создаём DataChannel
-    if (runtime.pc && (!runtime.dc || runtime.dc.readyState !== 'open')) {
-      const iceState = runtime.pc.iceConnectionState;
-      if (iceState === 'connected' || iceState === 'completed') {
-        console.log('[v2] handshake: ICE connected but no DC, creating data channel');
-        const dc = runtime.pc.createDataChannel('chat');
-        setupDataChannel(peerGuid, dc);
-      }
+    // Создаём DataChannel если его ещё нет (нужно для ondatachannel и для инициации negotiation)
+    if (runtime.pc && (!runtime.dc || runtime.dc.readyState === 'closed')) {
+      console.log('[v2] handshake: creating data channel for', peerGuid.slice(0, 8));
+      const dc = runtime.pc.createDataChannel('chat');
+      setupDataChannel(peerGuid, dc);
     }
 
     // Сбрасываем timestamp чтобы не игнорировать новые сообщения
