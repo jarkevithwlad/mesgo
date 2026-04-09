@@ -323,6 +323,7 @@ export async function pullMessages() {
   if (result.ok && result.result && result.result.data) {
     const messages = result.result.data.messages || [];
     let selectedChanged = false;
+    const pendingSignals = [];
 
     if (messages.length > 0) {
       console.log('[v2] pullMessages received', messages.length, 'messages, types:', messages.map(m => m.type || 'chat').join(', '));
@@ -330,15 +331,26 @@ export async function pullMessages() {
 
     for (const item of messages) {
       if (item.type) {
-        // Signal message — обрабатываем через WebRTC
-        try {
-          const { handleSignalMessage } = await import('./webrtc.js');
-          await handleSignalMessage(item);
-        } catch (_) {}
+        // Signal message — сначала ICE candidates, потом offer/answer
+        pendingSignals.push(item);
       } else {
         // Обычное сообщение
         const changed = await mergeIncomingPayload({ messages: [item] });
         selectedChanged = selectedChanged || changed;
+      }
+    }
+
+    // Обрабатываем signal в правильном порядке: ICE candidates → offer → answer
+    if (pendingSignals.length > 0) {
+      const { handleSignalMessage } = await import('./webrtc.js');
+      const priorityOrder = ['webrtc_ice_candidate', 'signal_ice', 'handshake_request', 'handshake_response', 'webrtc_offer', 'signal_offer', 'webrtc_answer', 'signal_answer'];
+      pendingSignals.sort((a, b) => {
+        const ai = priorityOrder.indexOf(a.type);
+        const bi = priorityOrder.indexOf(b.type);
+        return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      });
+      for (const item of pendingSignals) {
+        await handleSignalMessage(item);
       }
     }
 
