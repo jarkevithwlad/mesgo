@@ -1,6 +1,6 @@
 import { pullSignalMessages, sendGenericSignal } from './api.js';
 import { state, getActiveAccount, getDialogMap, getPeerRuntime, getSelectedPeerGuid } from './state.js';
-import { SIGNAL_NAMESPACE, WEBRTC_RETRY_INTERVAL, HANDSHAKE_INTERVAL, nowSeconds, uuidV5 } from './utils.js';
+import { SIGNAL_NAMESPACE, WEBRTC_RETRY_INTERVAL, HANDSHAKE_INTERVAL, nowSeconds, uuidV5, SESSION_ID } from './utils.js';
 import { ensureDialog, receiveDirectChatMessage, handleMsgAck, retryPendingMessage } from './chats.js';
 import { saveState } from './storage.js';
 
@@ -18,7 +18,9 @@ async function buildSignalMessage(type, payload) {
   return {
     guid: (await uuidV5(SIGNAL_NAMESPACE, `${ts}|signal|${type}|${Math.random()}`)).toLowerCase(),
     timestamp: ts, type,
-    from_guid: account.guid, from_nickname: account.nickname, payload
+    from_guid: account.guid, from_nickname: account.nickname,
+    session_id: SESSION_ID,
+    payload
   };
 }
 
@@ -131,8 +133,8 @@ function destroyPC(pg) {
   r.pc = null; r.dc = null; r.directReady = false;
   r.makingOffer = false; r.ignoreOffer = false;
   r.seenSignalIds = {}; r.remoteCandidatesQueue = [];
+  r.negotiationStartedAt = 0;
 }
-destroyPC._busy = false;
 
 /**
  * Создаёт или возвращает PC. Если PC уже есть и negotiation идёт — возвращает его.
@@ -336,6 +338,17 @@ export async function handleSignalMessage(message) {
   const nickname = String(message.from_nickname || '').trim() || getPeerNickname(pg);
   if (!pg || pg === account.guid) return false;
   const r = getPeerRuntime(pg);
+
+  // Фильтрация по sessionId — игнорируем сообщения от старых сессий
+  if (message.session_id && r.lastSeenSessionId && message.session_id !== r.lastSeenSessionId) {
+    // Новая сессия — сбрасываем всё и обновляем
+    console.log('[v2] session changed for', pg.slice(0, 8), message.session_id.slice(0, 8));
+    destroyPC(pg);
+    r.lastSeenSessionId = message.session_id;
+  }
+  if (message.session_id && !r.lastSeenSessionId) {
+    r.lastSeenSessionId = message.session_id;
+  }
 
   if (message.guid && r.seenSignalIds[message.guid]) return false;
   if (message.guid) r.seenSignalIds[message.guid] = Date.now();

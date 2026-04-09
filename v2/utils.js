@@ -95,10 +95,10 @@ export function nowSeconds() {
 }
 
 /**
- * Уникальный ID сессии клиента. Сбрасывается при каждом запуске.
- * Используется для фильтрации stale signal-сообщений.
+ * Уникальный ID сессии. Генерируется один раз при загрузке.
+ * Используется чтобы отличать stale сообщения от предыдущих запусков.
  */
-export const SESSION_ID = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+export const SESSION_ID = crypto.randomUUID();
 
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

@@ -135,7 +135,8 @@ export function getPeerRuntime(peerGuid) {
       handshakePending: false,
       // Connection epoch
       connectionEpoch: Date.now(),
-      minSignalTimestamp: 0
+      minSignalTimestamp: 0,
+      lastSeenSessionId: ''
     };
   }
 
