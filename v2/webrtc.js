@@ -148,18 +148,10 @@ async function _ensurePeerConnection(pg, nickname) {
   // DC open — готово
   if (r.pc && r.dc && r.dc.readyState === 'open') return r.pc;
 
-  // Negotiation в процессе — не трогаем
-  const busy = new Set(['have-remote-offer', 'have-local-offer', 'have-local-pranswer', 'have-remote-pranswer']);
-  if (r.pc && busy.has(r.pc.signalingState)) return r.pc;
+  // PC уже есть — НИКОГДА не пересоздаём
+  if (r.pc) return r.pc;
 
-  // ICE connected — не трогаем
-  if (r.pc) {
-    const ice = r.pc.iceConnectionState;
-    if (ice === 'connected' || ice === 'completed' || ice === 'checking') return r.pc;
-  }
-
-  // Уничтожаем старый и создаём новый
-  destroyPC(pg);
+  // PC нет — создаём один раз
   r.polite = account.guid.localeCompare(pg) > 0;
   r.status = 'connecting'; r.statusText = 'Идёт пробитие портов';
   r.connectionEpoch = Date.now(); r.negotiationStartedAt = Date.now();
@@ -250,7 +242,7 @@ async function processNegotiationMessage(pg, messageType, payload, nickname) {
   const account = getActiveAccount();
   if (!account) return false;
   const r = getPeerRuntime(pg);
-  const pc = await _ensurePeerConnection(pg, nickname);
+  const pc = r.pc;
   if (!pc) return false;
 
   if (messageType === 'webrtc_offer' || messageType === 'signal_offer') {
@@ -258,7 +250,7 @@ async function processNegotiationMessage(pg, messageType, payload, nickname) {
     if (!offer) return false;
     if (r.dc?.readyState === 'open') return true;
 
-    // Если PC в stable — принимаем offer
+    // PC в stable — принимаем offer
     if (pc.signalingState === 'stable') {
       try {
         await pc.setRemoteDescription(offer);
@@ -269,12 +261,13 @@ async function processNegotiationMessage(pg, messageType, payload, nickname) {
         return true;
       } catch (e) {
         console.warn('[v2] offer accept error:', e.message);
-        destroyPC(pg);
       }
     }
 
-    // PC не в stable — пересоздаём и пробуем снова
-    destroyPC(pg);
+    // PC не в stable — создаём новый
+    r.pc = null; r.dc = null; r.directReady = false;
+    r.makingOffer = false; r.ignoreOffer = false;
+    r.seenSignalIds = {}; r.remoteCandidatesQueue = [];
     const newPc = await _ensurePeerConnection(pg, nickname);
     if (!newPc) return false;
     try {
@@ -343,19 +336,20 @@ export async function handleSignalMessage(message) {
   const account = getActiveAccount();
   if (!account || !message?.type) return false;
   const pg = String(message.from_guid || '').toLowerCase();
+  if (!pg || pg === account.guid) return false; // Игнорируем свои сообщения
+
   const nickname = String(message.from_nickname || '').trim() || getPeerNickname(pg);
-  if (!pg || pg === account.guid) return false;
   const r = getPeerRuntime(pg);
 
-  // Фильтрация по sessionId — игнорируем сообщения от старых сессий
-  if (message.session_id && r.lastSeenSessionId && message.session_id !== r.lastSeenSessionId) {
-    // Новая сессия — сбрасываем всё и обновляем
-    console.log('[v2] session changed for', pg.slice(0, 8), message.session_id.slice(0, 8));
-    destroyPC(pg);
-    r.lastSeenSessionId = message.session_id;
-  }
-  if (message.session_id && !r.lastSeenSessionId) {
-    r.lastSeenSessionId = message.session_id;
+  // Фильтрация по sessionId — только новая сессия обновляет, НЕ сбрасывает PC
+  const msgSessionId = message.session_id || message.payload?.session_id;
+  if (msgSessionId) {
+    if (r.lastSeenSessionId && msgSessionId !== r.lastSeenSessionId) {
+      r.lastSeenSessionId = msgSessionId;
+      r.seenSignalIds = {};
+    } else if (!r.lastSeenSessionId) {
+      r.lastSeenSessionId = msgSessionId;
+    }
   }
 
   if (message.guid && r.seenSignalIds[message.guid]) return false;
@@ -394,22 +388,14 @@ export function ensureHandshakeLoop(pg, nickname) {
     const sel = getSelectedPeerGuid();
     if (sel !== pg && r.callState === 'idle') return;
 
-    // Если PC есть и ICE в процессе или negotiation идёт — НЕ трогаем
-    if (r.pc) {
-      const ice = r.pc.iceConnectionState;
-      if (ice === 'checking' || ice === 'connected' || ice === 'completed') return;
-      const busy = new Set(['have-remote-offer', 'have-local-offer', 'have-local-pranswer', 'have-remote-pranswer']);
-      if (busy.has(r.pc.signalingState)) return;
-      // Если PC создан менее 10 сек назад — ждём
-      if (r.negotiationStartedAt && (Date.now() - r.negotiationStartedAt) < 10000) return;
-    }
+    // Если PC есть — handshake не нужен, ждём пока negotiation завершится
+    if (r.pc) return;
 
-    // Только polite клиент пересоздаёт PC и шлёт offer
+    // PC нет — создаём (только polite клиент)
     if (!r.handshakePending && r.polite) {
       r.handshakePending = true;
-      console.log('[v2] handshake: recreating PC for', pg.slice(0, 8));
-      destroyPC(pg);
-      _ensurePeerConnection(pg, nickname).then(pc => {
+      console.log('[v2] handshake: creating PC for', pg.slice(0, 8));
+      _ensurePeerConnection(pg, nickname).then(() => {
         r.handshakePending = false;
       }).catch(() => { r.handshakePending = false; });
     }
