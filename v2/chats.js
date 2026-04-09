@@ -1,5 +1,5 @@
 import { getActiveAccount, getDialogArray, getSelectedPeerGuid, setSelectedPeerGuid, getPeerRuntime } from './state.js';
-import { pullFromBook, postToBook } from './api.js';
+import { pullRegularMessages } from './api.js';
 import { MESSAGE_NAMESPACE, USER_NAMESPACE, nowSeconds, sanitizeNickname, uuidV5, MSG_ACK_TIMEOUT, MSG_ACK_RETRIES } from './utils.js';
 import { saveState, wipeDialogFromStorage } from './storage.js';
 
@@ -385,25 +385,24 @@ export async function sendMessageToPeer(peerGuid, peerNickname, text, options = 
     }
   }
 
-  // Фоллбэк через сервер
-  const bookPath = options.bookPath || null;
-  if (bookPath) {
-    try {
-      await postToBook(peerGuid, bookPath, [
-        {
-          guid: messageGuid,
-          message: cleanText,
-          timestamp,
-          from_guid: account.guid,
-          from_nickname: account.nickname,
-          to_guid: peerGuid,
-          to_nickname: peerNickname
-        }
-      ]);
-      updateMessageDeliveryStatus(peerGuid, messageGuid, 'sent');
-    } catch (_) {
-      updateMessageDeliveryStatus(peerGuid, messageGuid, 'error');
-    }
+  // Фоллбэк через сервер (regular endpoint)
+  // Используем стандартную отправку сообщений
+  try {
+    const { sendGenericMessages } = await import('./api.js');
+    await sendGenericMessages(peerGuid, [
+      {
+        guid: messageGuid,
+        message: cleanText,
+        timestamp,
+        from_guid: account.guid,
+        from_nickname: account.nickname,
+        to_guid: peerGuid,
+        to_nickname: peerNickname
+      }
+    ]);
+    updateMessageDeliveryStatus(peerGuid, messageGuid, 'sent');
+  } catch (_) {
+    updateMessageDeliveryStatus(peerGuid, messageGuid, 'error');
   }
 
   return { direct: false, message: localMessage };
