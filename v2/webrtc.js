@@ -39,11 +39,23 @@ async function sendServerSignal(peerGuid, type, payload = {}) {
   if (!account) return false;
   const message = await buildSignalMessage(type, payload);
   try {
-    const result = await sendGenericSignal(peerGuid, [message]);
+    let result = await sendGenericSignal(peerGuid, [message]);
+    // Если STUN endpoint не работает (404/500) — fallback через messages endpoint
+    if (!result.ok && (result.status === 404 || result.status === 500)) {
+      const { sendGenericMessages } = await import('./api.js');
+      result = await sendGenericMessages(peerGuid, [message]);
+    }
     return result.ok;
   } catch (err) {
-    console.warn('[v2] signal send error:', err.message);
-    return false;
+    console.warn('[v2] signal send error, trying fallback:', err.message);
+    try {
+      const { sendGenericMessages } = await import('./api.js');
+      const result = await sendGenericMessages(peerGuid, [message]);
+      return result.ok;
+    } catch (e) {
+      console.warn('[v2] signal fallback also failed:', e.message);
+      return false;
+    }
   }
 }
 
@@ -468,7 +480,24 @@ export async function pollSignalServer() {
         anyChanged = anyChanged || await handleSignalMessage(item);
       }
     }
-  } catch (err) { console.warn('[v2] signal poll error:', err.message); }
+  } catch (err) {
+    console.warn('[v2] signal poll error:', err.message);
+  }
+
+  // Fallback: если STUN endpoint не работает, поллим messages endpoint для signal
+  try {
+    const { pullRegularMessages } = await import('./api.js');
+    const result = await pullRegularMessages();
+    if (result.ok && result.result?.data) {
+      const messages = result.result.data.messages || [];
+      for (const item of messages) {
+        if (item.type) { // Это signal message
+          anyChanged = anyChanged || await handleSignalMessage(item);
+        }
+      }
+    }
+  } catch (_) {}
+
   if (anyChanged) { saveState(); emitUiRefresh(); }
   return { ok: true, changed: anyChanged };
 }
