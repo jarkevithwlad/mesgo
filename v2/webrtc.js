@@ -220,7 +220,7 @@ export async function initiateDirectPeer(pg, nickname) {
     }
     return r.pc;
   }
-  const pc = await ensurePeerConnection(pg, nickname);
+  const pc = await _ensurePeerConnection(pg, nickname);
   if (!pc) return false;
   r.isInitiator = true; r.status = 'connecting'; r.statusText = 'Идёт пробитие портов';
   const dc = pc.createDataChannel('chat');
@@ -240,7 +240,7 @@ async function processNegotiationMessage(pg, messageType, payload, nickname) {
   const account = getActiveAccount();
   if (!account) return false;
   const r = getPeerRuntime(pg);
-  const pc = await ensurePeerConnection(pg, nickname);
+  const pc = await _ensurePeerConnection(pg, nickname);
   if (!pc) return false;
 
   if (messageType === 'webrtc_offer' || messageType === 'signal_offer') {
@@ -265,7 +265,7 @@ async function processNegotiationMessage(pg, messageType, payload, nickname) {
 
     // PC не в stable — пересоздаём и пробуем снова
     destroyPC(pg);
-    const newPc = await ensurePeerConnection(pg, nickname);
+    const newPc = await _ensurePeerConnection(pg, nickname);
     if (!newPc) return false;
     try {
       await newPc.setRemoteDescription(offer);
@@ -384,7 +384,7 @@ export function ensureHandshakeLoop(pg, nickname) {
       r.handshakePending = true;
       console.log('[v2] handshake: recreating PC for', pg.slice(0, 8));
       destroyPC(pg);
-      ensurePeerConnection(pg, nickname).then(pc => {
+      _ensurePeerConnection(pg, nickname).then(pc => {
         if (pc && r.polite) {
           r.makingOffer = true;
           pc.setLocalDescription().then(() => {
