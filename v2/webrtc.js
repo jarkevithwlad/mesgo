@@ -443,7 +443,7 @@ export function getPeerConnectionStatus(pg) {
   };
 }
 
-export function clearPeerMedia(pg) {
+function clearPeerMedia(pg) {
   const r = getPeerRuntime(pg);
   if (r.pc) { try { r.pc.getSenders().forEach(s => { if (s.track?.kind === 'audio') { try { r.pc.removeTrack(s); s.track.stop(); } catch (_) {} } }); } catch (_) {} }
   if (r.localStream) { try { r.localStream.getTracks().forEach(t => t.stop()); } catch (_) {} r.localStream = null; }
@@ -452,7 +452,7 @@ export function clearPeerMedia(pg) {
   emitUiRefresh();
 }
 
-export async function closePeerConnection(pg) {
+async function closePeerConnection(pg) {
   const r = getPeerRuntime(pg);
   stopPingLoop(pg); stopRetryLoop(pg); stopHandshakeLoop(pg);
   clearPeerMedia(pg);
