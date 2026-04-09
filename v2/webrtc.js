@@ -247,22 +247,30 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
   runtime.status = 'connecting';
   runtime.statusText = 'Идёт пробитие портов';
   runtime.connectionEpoch = Date.now();
+  runtime.negotiationStartedAt = Date.now();
+
+  console.log('[v2] creating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
   runtime.pc = pc;
 
   pc.onicecandidate = async (event) => {
     if (!event.candidate) return;
-
+    const c = event.candidate.candidate;
+    const parts = c.split(' ');
+    const type = parts[6]; // host, srflx, prflx, relay
+    const addr = parts[4];
+    console.log('[v2] ICE candidate for', peerGuid.slice(0, 8), '| type:', type, '| addr:', addr);
     try {
-      await sendNegotiationMessage(peerGuid, 'ice', {
-        candidate: event.candidate
-      });
-    } catch (_) {}
+      await sendNegotiationMessage(peerGuid, 'ice', { candidate: event.candidate });
+    } catch (e) {
+      console.warn('[v2] ICE send error:', e.message);
+    }
   };
 
   pc.onconnectionstatechange = () => {
     const value = pc.connectionState;
+    console.log('[v2] connectionState for', peerGuid.slice(0, 8), ':', value);
     runtime.status = value;
 
     if (value === 'connected') {
@@ -281,7 +289,6 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
       runtime.directReady = false;
       runtime.pingMs = null;
       setCallEnabled(peerGuid, false);
-      // Запускаем handshake для восстановления
       ensureHandshakeLoop(peerGuid, peerNickname);
     } else if (value === 'closed') {
       runtime.statusText = 'Соединение закрыто';
@@ -289,12 +296,12 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
       runtime.pingMs = null;
       setCallEnabled(peerGuid, false);
     }
-
     emitUiRefresh();
   };
 
   pc.oniceconnectionstatechange = () => {
     const iceState = pc.iceConnectionState;
+    console.log('[v2] iceConnectionState for', peerGuid.slice(0, 8), ':', iceState);
 
     if (iceState === 'checking') {
       runtime.statusText = 'Проверка прямого маршрута';
@@ -303,32 +310,34 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
     } else if (iceState === 'failed') {
       runtime.statusText = 'Не удалось пробить порты';
     }
-
     emitUiRefresh();
   };
 
   pc.ondatachannel = (event) => {
+    console.log('[v2] ondatachannel for', peerGuid.slice(0, 8));
     setupDataChannel(peerGuid, event.channel);
   };
 
   pc.ontrack = (event) => {
     const stream = event.streams && event.streams[0] ? event.streams[0] : null;
     if (!stream) return;
-
+    console.log('[v2] ontrack for', peerGuid.slice(0, 8));
     runtime.remoteStream = stream;
     attachRemoteAudio(peerGuid, stream);
     emitUiRefresh();
   };
 
   pc.onnegotiationneeded = async () => {
+    console.log('[v2] onnegotiationneeded for', peerGuid.slice(0, 8));
     try {
       runtime.makingOffer = true;
       await pc.setLocalDescription();
-
+      console.log('[v2] sending offer for', peerGuid.slice(0, 8));
       await sendNegotiationMessage(peerGuid, 'offer', {
         sdp: pc.localDescription
       });
-    } catch (_) {
+    } catch (e) {
+      console.warn('[v2] negotiation error for', peerGuid.slice(0, 8), ':', e.message);
       runtime.statusText = 'Ошибка согласования соединения';
       emitUiRefresh();
     } finally {
@@ -388,6 +397,12 @@ async function processNegotiationMessage(peerGuid, messageType, payload, peerNic
     if (runtime.ignoreOffer) return false;
 
     try {
+      // Polite client: rollback local offer перед accept remote offer
+      if (offerCollision && runtime.polite) {
+        console.log('[v2] polite client rolling back local offer for', peerGuid.slice(0, 8));
+        await pc.setLocalDescription({ type: 'rollback' });
+      }
+
       await pc.setRemoteDescription(offer);
       await flushQueuedCandidates(runtime);
       await pc.setLocalDescription(await pc.createAnswer());
@@ -395,7 +410,8 @@ async function processNegotiationMessage(peerGuid, messageType, payload, peerNic
       await sendNegotiationMessage(peerGuid, 'answer', {
         sdp: pc.localDescription
       });
-    } catch (_) {
+    } catch (e) {
+      console.warn('[v2] offer processing error for', peerGuid.slice(0, 8), ':', e.message);
       runtime.statusText = 'Ошибка обработки offer';
       emitUiRefresh();
       return false;
@@ -410,10 +426,14 @@ async function processNegotiationMessage(peerGuid, messageType, payload, peerNic
     const answer = payload && payload.sdp ? payload.sdp : null;
     if (!answer) return false;
 
+    console.log('[v2] received answer for', peerGuid.slice(0, 8), 'signalingState:', pc.signalingState);
+
     try {
       await pc.setRemoteDescription(answer);
       await flushQueuedCandidates(runtime);
-    } catch (_) {
+      console.log('[v2] answer set for', peerGuid.slice(0, 8));
+    } catch (e) {
+      console.warn('[v2] answer processing error for', peerGuid.slice(0, 8), ':', e.message);
       runtime.statusText = 'Ошибка обработки answer';
       emitUiRefresh();
       return false;
@@ -626,6 +646,22 @@ export function ensureHandshakeLoop(peerGuid, peerNickname) {
 
     if (!shouldWork) return;
     if (runtime.directReady) return;
+
+    // Проверяем не застрял ли negotiation (> 12 сек без результата)
+    if (runtime.pc && runtime.negotiationStartedAt) {
+      const negotiationAge = Date.now() - runtime.negotiationStartedAt;
+      if (negotiationAge > 12000) {
+        console.log('[v2] negotiation stuck for', negotiationAge, 'ms, recreating PC');
+        try { runtime.pc.close(); } catch (_) {}
+        runtime.pc = null;
+        runtime.dc = null;
+        runtime.directReady = false;
+        runtime.makingOffer = false;
+        runtime.ignoreOffer = false;
+        runtime.negotiationStartedAt = 0;
+      }
+    }
+
     if (runtime.handshakePending) return;
 
     console.log('[v2] sending handshake_request to', peerGuid.slice(0, 8));
