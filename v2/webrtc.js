@@ -373,13 +373,18 @@ export function ensureHandshakeLoop(pg, nickname) {
     const sel = getSelectedPeerGuid();
     if (sel !== pg && r.callState === 'idle') return;
 
-    // Если PC есть и ICE checking — ждём
+    // Если PC есть и ICE в активном состоянии — НЕ трогаем
     if (r.pc) {
       const ice = r.pc.iceConnectionState;
       if (ice === 'checking' || ice === 'connected' || ice === 'completed') return;
+      // Если negotiation в процессе — НЕ трогаем
+      const busy = new Set(['have-remote-offer', 'have-local-offer', 'have-local-pranswer', 'have-remote-pranswer']);
+      if (busy.has(r.pc.signalingState)) return;
+      // Если PC создан менее 8 сек назад — НЕ трогаем, даём время на ICE
+      if (r.negotiationStartedAt && (Date.now() - r.negotiationStartedAt) < 8000) return;
     }
 
-    // Пересоздаём PC и шлём offer
+    // Только если прошло > 8 сек и ICE не checking — пересоздаём
     if (!r.handshakePending) {
       r.handshakePending = true;
       console.log('[v2] handshake: recreating PC for', pg.slice(0, 8));
