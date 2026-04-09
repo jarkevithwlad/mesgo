@@ -220,37 +220,10 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
 
   const runtime = getPeerRuntime(peerGuid);
 
-  // Если PC есть и negotiation в процессе — НЕ пересоздаём
-  if (runtime.pc && BUSY_SIGNALING_STATES.has(runtime.pc.signalingState)) {
-    return runtime.pc;
-  }
-
-  // Если ICE уже connected/completed — НЕ пересоздаём (даже если signalingState stable)
+  // Если PC уже есть — НИКОГДА не пересоздаём
+  // Это критически важно — пересоздание PC убивает всё
   if (runtime.pc) {
-    const iceState = runtime.pc.iceConnectionState;
-    if (iceState === 'connected' || iceState === 'completed') {
-      console.log('[v2] ICE already', iceState, 'for', peerGuid.slice(0, 8), '— skipping PC creation');
-      return runtime.pc;
-    }
-  }
-
-  // Если DC open — PC живой
-  if (runtime.pc && runtime.dc && runtime.dc.readyState === 'open') {
     return runtime.pc;
-  }
-
-  // Если PC есть но closed — зачищаем
-  if (runtime.pc) {
-    try {
-      runtime.pc.close();
-    } catch (_) {}
-    runtime.pc = null;
-    runtime.dc = null;
-    runtime.directReady = false;
-    runtime.makingOffer = false;
-    runtime.ignoreOffer = false;
-    runtime.seenSignalIds = {}; // Очищаем чтобы не обрабатывать stale messages
-    runtime.remoteCandidatesQueue = [];
   }
 
   runtime.polite = account.guid.localeCompare(peerGuid) > 0;
@@ -259,9 +232,6 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
   runtime.statusText = 'Идёт пробитие портов';
   runtime.connectionEpoch = Date.now();
   runtime.negotiationStartedAt = Date.now();
-
-  // Игнорируем signal-сообщения которые были отправлены ДО создания этого PC
-  // Это защищает от обработки stale сообщений с сервера
   runtime.minSignalTimestamp = Date.now();
 
   console.log('[v2] creating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
@@ -365,12 +335,27 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
 
 export async function initiateDirectPeer(peerGuid, peerNickname) {
   const runtime = getPeerRuntime(peerGuid);
-  const pc = await ensurePeerConnection(peerGuid, peerNickname);
-  if (!pc) return false;
 
-  if (runtime.dc && runtime.dc.readyState !== 'closed') {
+  // Если DC уже open — ничего не делаем
+  if (runtime.dc && runtime.dc.readyState === 'open') {
     return true;
   }
+
+  // Если PC есть — НЕ пересоздаём НИКОГДА из retry loop
+  // WebRTC сам разберётся с reconnect
+  if (runtime.pc) {
+    // Если DC нет — создаём (это вызовет onnegotiationneeded)
+    if (!runtime.dc || runtime.dc.readyState === 'closed') {
+      console.log('[v2] initiateDirectPeer: creating DC on existing PC for', peerGuid.slice(0, 8));
+      const dc = runtime.pc.createDataChannel('chat');
+      setupDataChannel(peerGuid, dc);
+    }
+    return runtime.pc;
+  }
+
+  // PC нет — создаём новый (единственный случай)
+  const pc = await ensurePeerConnection(peerGuid, peerNickname);
+  if (!pc) return false;
 
   runtime.isInitiator = true;
   runtime.status = 'connecting';
@@ -595,39 +580,64 @@ async function handleSignalMessage(message) {
 
   // Handshake request — специальный обработчик
   if (message.type === 'handshake_request') {
-    console.log('[v2] received handshake_request from', peerGuid.slice(0, 8));
+    console.log('[v2] received handshake_request from', peerGuid.slice(0, 8),
+      'PC:', !!runtime.pc, 'DC:', runtime.dc?.readyState);
     runtime.lastHandshakeAt = Date.now();
     runtime.handshakePending = false;
 
-    // Если PC уже есть и negotiation в процессе или DC open — НЕ пересоздаём
-    if (runtime.pc) {
-      if (BUSY_SIGNALING_STATES.has(runtime.pc.signalingState)) {
-        console.log('[v2] handshake: PC already negotiating, skipping');
-        saveState();
-        emitUiRefresh();
-        return true;
-      }
-      if (runtime.dc && runtime.dc.readyState === 'open') {
-        console.log('[v2] handshake: DC already open, skipping');
-        saveState();
-        emitUiRefresh();
-        return true;
-      }
+    // Если DC уже open — ничего не делаем
+    if (runtime.dc && runtime.dc.readyState === 'open') {
+      saveState();
+      emitUiRefresh();
+      return true;
     }
 
-    // PC нет или закрыт — создаём
-    await ensurePeerConnection(peerGuid, peerNickname);
-    console.log('[v2] handshake: created/reused PC for', peerGuid.slice(0, 8));
+    // Если PC существует — НЕ вызываем ensurePeerConnection (он пересоздаёт PC!)
+    // Только создаём DC если его нет
+    if (runtime.pc) {
+      const signalingState = runtime.pc.signalingState;
+      const iceState = runtime.pc.iceConnectionState;
+      
+      // Если ICE connected/completed — соединение установлено
+      if (iceState === 'connected' || iceState === 'completed') {
+        console.log('[v2] handshake: ICE', iceState, 'for', peerGuid.slice(0, 8));
+        saveState();
+        emitUiRefresh();
+        return true;
+      }
+      
+      // Если negotiation в процессе (have-remote-offer / have-local-offer) — ждём
+      if (BUSY_SIGNALING_STATES.has(signalingState)) {
+        console.log('[v2] handshake: negotiation in progress for', peerGuid.slice(0, 8));
+        saveState();
+        emitUiRefresh();
+        return true;
+      }
+      
+      // Если PC в stable и DC нет или не open — создаём DC (это вызовет negotiation)
+      // НЕ вызываем ensurePeerConnection!
+      if (signalingState === 'stable' && (!runtime.dc || runtime.dc.readyState !== 'open')) {
+        console.log('[v2] handshake: creating DC on existing PC for', peerGuid.slice(0, 8));
+        const dc = runtime.pc.createDataChannel('chat');
+        setupDataChannel(peerGuid, dc);
+      }
+      
+      saveState();
+      emitUiRefresh();
+      return true;
+    }
 
-    // Создаём DataChannel если его ещё нет (нужно для ondatachannel и для инициации negotiation)
-    if (runtime.pc && (!runtime.dc || runtime.dc.readyState === 'closed')) {
-      console.log('[v2] handshake: creating data channel for', peerGuid.slice(0, 8));
+    // PC нет — создаём с нуля
+    console.log('[v2] handshake: no PC, creating for', peerGuid.slice(0, 8));
+    await ensurePeerConnection(peerGuid, peerNickname);
+    runtime.minSignalTimestamp = Date.now();
+
+    // Создаём DC на новом PC
+    if (runtime.pc && (!runtime.dc || runtime.dc.readyState !== 'open')) {
+      console.log('[v2] handshake: creating DC on new PC for', peerGuid.slice(0, 8));
       const dc = runtime.pc.createDataChannel('chat');
       setupDataChannel(peerGuid, dc);
     }
-
-    // Сбрасываем timestamp чтобы не игнорировать новые сообщения
-    runtime.minSignalTimestamp = Date.now();
 
     saveState();
     emitUiRefresh();
@@ -692,20 +702,8 @@ export function ensureHandshakeLoop(peerGuid, peerNickname) {
     if (!shouldWork) return;
     if (runtime.directReady) return;
 
-    // Проверяем не застрял ли negotiation (> 12 сек без результата)
-    if (runtime.pc && runtime.negotiationStartedAt) {
-      const negotiationAge = Date.now() - runtime.negotiationStartedAt;
-      if (negotiationAge > 12000) {
-        console.log('[v2] negotiation stuck for', negotiationAge, 'ms, recreating PC');
-        try { runtime.pc.close(); } catch (_) {}
-        runtime.pc = null;
-        runtime.dc = null;
-        runtime.directReady = false;
-        runtime.makingOffer = false;
-        runtime.ignoreOffer = false;
-        runtime.negotiationStartedAt = 0;
-      }
-    }
+    // Убрал negotiation stuck timer — он убивал активные соединения
+    // WebRTC сам разберётся с reconnect
 
     if (runtime.handshakePending) return;
 
@@ -754,10 +752,18 @@ export function stopRetryLoop(peerGuid) {
 
 export async function ensureDirectForPeer(peerGuid, peerNickname) {
   const runtime = getPeerRuntime(peerGuid);
-  console.log('[v2] ensureDirectForPeer', peerGuid.slice(0, 8), 'directReady:', runtime.directReady);
+  console.log('[v2] ensureDirectForPeer', peerGuid.slice(0, 8), 'directReady:', runtime.directReady, 'PC:', !!runtime.pc, 'DC:', runtime.dc?.readyState);
 
   if (runtime.directReady) return true;
 
+  // Если PC есть — НЕ пересоздаём, только запускаем handshake loop
+  if (runtime.pc) {
+    console.log('[v2] ensureDirectForPeer: PC exists, starting handshake loop');
+    ensureHandshakeLoop(peerGuid, peerNickname);
+    return true;
+  }
+
+  // PC нет — создаём с нуля
   await initiateDirectPeer(peerGuid, peerNickname);
   ensureRetryLoop(peerGuid, peerNickname);
   ensureHandshakeLoop(peerGuid, peerNickname);
