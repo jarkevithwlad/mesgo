@@ -418,11 +418,9 @@ async function handleDirectPayload(peerGuid, payload) {
   if (payload.type === 'handshake_request') {
     runtime.lastHandshakeAt = Date.now();
     runtime.handshakePending = false;
-    const pc = await ensurePeerConnection(peerGuid, peerNickname);
-    if (pc && (!runtime.dc || runtime.dc.readyState !== 'open') && runtime.polite) {
-      const dc = pc.createDataChannel('chat');
-      setupDataChannel(peerGuid, dc);
-    }
+    // Всегда пересоздаём PC при handshake от новой стороны — это гарантия что negotiation начнётся заново
+    console.log('[v2] handshake: recreating PC for', peerGuid.slice(0, 8));
+    await recreatePeerConnection(peerGuid, peerNickname);
     await sendDirectPayload(peerGuid, { type: 'handshake_response', timestampMs: Date.now() });
     emitUiRefresh();
     return;
