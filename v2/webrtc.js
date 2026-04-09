@@ -221,11 +221,13 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
   const runtime = getPeerRuntime(peerGuid);
 
   // Если PC уже есть — НИКОГДА не пересоздаём
-  // Это критически важно — пересоздание PC убивает всё
   if (runtime.pc) {
     return runtime.pc;
   }
 
+  // Только "polite" клиент создаёт DataChannel при инициализации.
+  // "Impolite" клиент будет ждать DC от polite (через ondatachannel).
+  // Это предотвращает collision когда оба создают DC одновременно.
   runtime.polite = account.guid.localeCompare(peerGuid) > 0;
   runtime.isInitiator = false;
   runtime.status = 'connecting';
@@ -341,19 +343,19 @@ export async function initiateDirectPeer(peerGuid, peerNickname) {
     return true;
   }
 
-  // Если PC есть — НЕ пересоздаём НИКОГДА из retry loop
-  // WebRTC сам разберётся с reconnect
+  // Если PC есть — НЕ пересоздаём
   if (runtime.pc) {
-    // Если DC нет — создаём (это вызовет onnegotiationneeded)
-    if (!runtime.dc || runtime.dc.readyState === 'closed') {
-      console.log('[v2] initiateDirectPeer: creating DC on existing PC for', peerGuid.slice(0, 8));
+    // Если DC нет — создаём ТОЛЬКО если мы polite клиент
+    // Impolite клиент ждёт DC от polite (через ondatachannel)
+    if (runtime.polite && (!runtime.dc || runtime.dc.readyState === 'closed')) {
+      console.log('[v2] initiateDirectPeer: polite creating DC for', peerGuid.slice(0, 8));
       const dc = runtime.pc.createDataChannel('chat');
       setupDataChannel(peerGuid, dc);
     }
     return runtime.pc;
   }
 
-  // PC нет — создаём новый (единственный случай)
+  // PC нет — создаём новый
   const pc = await ensurePeerConnection(peerGuid, peerNickname);
   if (!pc) return false;
 
@@ -361,8 +363,12 @@ export async function initiateDirectPeer(peerGuid, peerNickname) {
   runtime.status = 'connecting';
   runtime.statusText = 'Идёт пробитие портов';
 
-  const dc = pc.createDataChannel('chat');
-  setupDataChannel(peerGuid, dc);
+  // Только polite клиент создаёт DC — impolite получит через ondatachannel
+  if (runtime.polite) {
+    console.log('[v2] initiateDirectPeer: polite creating DC on new PC for', peerGuid.slice(0, 8));
+    const dc = pc.createDataChannel('chat');
+    setupDataChannel(peerGuid, dc);
+  }
   emitUiRefresh();
   return true;
 }
@@ -598,9 +604,9 @@ async function handleSignalMessage(message) {
       const signalingState = runtime.pc.signalingState;
       const iceState = runtime.pc.iceConnectionState;
       
-      // Если ICE connected/completed — соединение установлено
+      // Если ICE connected/completed — НЕ создаём DC повторно, он откроется сам
       if (iceState === 'connected' || iceState === 'completed') {
-        console.log('[v2] handshake: ICE', iceState, 'for', peerGuid.slice(0, 8));
+        console.log('[v2] handshake: ICE', iceState, 'for', peerGuid.slice(0, 8), '— waiting for DC open');
         saveState();
         emitUiRefresh();
         return true;
@@ -608,16 +614,21 @@ async function handleSignalMessage(message) {
       
       // Если negotiation в процессе (have-remote-offer / have-local-offer) — ждём
       if (BUSY_SIGNALING_STATES.has(signalingState)) {
-        console.log('[v2] handshake: negotiation in progress for', peerGuid.slice(0, 8));
         saveState();
         emitUiRefresh();
         return true;
       }
       
-      // Если PC в stable и DC нет или не open — создаём DC (это вызовет negotiation)
-      // НЕ вызываем ensurePeerConnection!
-      if (signalingState === 'stable' && (!runtime.dc || runtime.dc.readyState !== 'open')) {
-        console.log('[v2] handshake: creating DC on existing PC for', peerGuid.slice(0, 8));
+      // Если DC уже есть (даже в состоянии connecting) — НЕ создаём новый
+      if (runtime.dc && runtime.dc.readyState !== 'closed') {
+        saveState();
+        emitUiRefresh();
+        return true;
+      }
+      
+      // Если PC в stable и DC нет — создаём DC ТОЛЬКО если мы polite клиент
+      if (signalingState === 'stable' && runtime.polite) {
+        console.log('[v2] handshake: polite creating DC on stable PC for', peerGuid.slice(0, 8));
         const dc = runtime.pc.createDataChannel('chat');
         setupDataChannel(peerGuid, dc);
       }
