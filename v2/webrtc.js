@@ -425,12 +425,15 @@ async function handleDirectPayload(peerGuid, payload) {
       return;
     }
 
-    // Peresоздаём PC для чистой negotiation
+    // Пересоздаём PC для чистой negotiation
     console.log('[v2] handshake: recreating PC for', peerGuid.slice(0, 8), 'polite:', runtime.polite);
     await recreatePeerConnection(peerGuid, peerNickname);
     const pc = runtime.pc;
 
-    // Только polite клиент инициирует negotiation — impolite ждёт offer
+    // Отправляем handshake_response через СЕРВЕР (DC ещё нет!)
+    await sendServerSignal(peerGuid, 'handshake_response', { timestampMs: Date.now() });
+
+    // Polite клиент сразу шлёт offer
     if (pc && runtime.polite) {
       try {
         runtime.makingOffer = true;
