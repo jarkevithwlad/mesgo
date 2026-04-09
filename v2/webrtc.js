@@ -484,33 +484,6 @@ async function handleDirectPayload(peerGuid, payload) {
     emitUiRefresh();
     return true;
   }
-    // Impolite клиент получил подтверждение что peer готов — инициируем negotiation
-    const runtime = getPeerRuntime(peerGuid);
-    runtime.lastHandshakeResponseAt = Date.now();
-    runtime.handshakePending = false;
-
-    if (runtime.dc?.readyState === 'open') {
-      emitUiRefresh();
-      return;
-    }
-
-    // Если мы polite и DC нет — шлём offer
-    if (runtime.polite && runtime.pc && (!runtime.dc || runtime.dc.readyState !== 'open')) {
-      console.log('[v2] handshake_response: polite sending offer for', peerGuid.slice(0, 8));
-      try {
-        runtime.makingOffer = true;
-        await runtime.pc.setLocalDescription();
-        await sendNegotiationMessage(peerGuid, 'offer', { sdp: runtime.pc.localDescription });
-      } catch (e) {
-        console.warn('[v2] handshake_response offer error:', e.message);
-      } finally {
-        runtime.makingOffer = false;
-      }
-    }
-
-    emitUiRefresh();
-    return;
-  }
   if (['signal_offer', 'signal_answer', 'signal_ice'].includes(payload.type)) {
     await processNegotiationMessage(peerGuid, payload.type, payload.payload || {}, peerNickname);
     return;
