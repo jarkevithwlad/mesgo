@@ -215,11 +215,14 @@ export async function ensurePeerConnection(peerGuid, peerNickname) {
     return runtime.pc;
   }
 
-  // Если PC был но DC закрыт — закрываем старый PC полностью
+  // Если PC есть и ещё не закрыт (идёт negotiation) — НЕ пересоздаём
   if (runtime.pc) {
-    try {
-      runtime.pc.close();
-    } catch (_) {}
+    const signalingState = runtime.pc.signalingState;
+    if (signalingState !== 'closed') {
+      // Negotiation в процессе, не мешаем
+      return runtime.pc;
+    }
+    // PC полностью закры — зачищаем
     runtime.pc = null;
     runtime.dc = null;
     runtime.directReady = false;
